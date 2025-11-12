@@ -118,6 +118,9 @@ class Protenix(nn.Module):
         )
         self.layernorm_z_cycle = LayerNorm(self.c_z)
         self.layernorm_s = LayerNorm(self.c_s)
+        
+        
+        self.distill_mode = configs.get('distill_mode', 0) # 0 forbidden distill; 1 means teacher; 2 means student;
 
         # Zero init the recycling layer
         nn.init.zeros_(self.linear_no_bias_z_cycle.weight)
@@ -355,15 +358,22 @@ class Protenix(nn.Module):
         def _list_join(dict_list, key):
             return sum([x[key] for x in dict_list], [])
 
-        all_pred_dict = {
-            "coordinate": _cat(pred_dicts, "coordinate"),
-            "summary_confidence": _list_join(pred_dicts, "summary_confidence"),
-            "full_data": _list_join(pred_dicts, "full_data"),
-            "plddt": _cat(pred_dicts, "plddt"),
-            "pae": _cat(pred_dicts, "pae"),
-            "pde": _cat(pred_dicts, "pde"),
-            "resolved": _cat(pred_dicts, "resolved"),
-        }
+        if self.distill_mode == 2:
+            all_pred_dict = {
+                "s_inputs": _cat(pred_dicts, "s_inputs"),
+                "s": _cat(pred_dicts, "s"),
+                "z": _cat(pred_dicts, "z"),
+            }
+        else:
+            all_pred_dict = {
+                "coordinate": _cat(pred_dicts, "coordinate"),
+                "summary_confidence": _list_join(pred_dicts, "summary_confidence"),
+                "full_data": _list_join(pred_dicts, "full_data"),
+                "plddt": _cat(pred_dicts, "plddt"),
+                "pae": _cat(pred_dicts, "pae"),
+                "pde": _cat(pred_dicts, "pde"),
+                "resolved": _cat(pred_dicts, "resolved"),
+            }
 
         all_log_dict = simple_merge_dict_list(log_dicts)
         all_time_dict = simple_merge_dict_list(time_trackers)
@@ -392,12 +402,21 @@ class Protenix(nn.Module):
         pred_dict = {}
         time_tracker = {}
 
-        s_inputs, s, z = self.get_pairformer_output(
-            input_feature_dict=input_feature_dict,
-            N_cycle=N_cycle,
-            inplace_safe=inplace_safe,
-            chunk_size=chunk_size,
-        )
+        if self.distill_mode == 1 and mode == 'eval':
+            s_inputs, s, z = input_feature_dict['s_inputs'], input_feature_dict['s'], input_feature_dict['z'] # teacher get the output from student to eval
+        else:            
+            s_inputs, s, z = self.get_pairformer_output(
+                input_feature_dict=input_feature_dict,
+                N_cycle=N_cycle,
+                inplace_safe=inplace_safe,
+                chunk_size=chunk_size,
+            )
+        
+        if self.distill_mode == 2 and mode == 'eval':
+            return {'s_inputs': s_inputs, 's': s, 'z': z}, log_dict, time_tracker # student return the output to mimic the teacher
+       
+        
+        
         if mode == "inference":
             keys_to_delete = []
             for key in input_feature_dict.keys():
@@ -551,9 +570,22 @@ class Protenix(nn.Module):
             inplace_safe=inplace_safe,
             chunk_size=chunk_size,
         )
-
+        
+        
         log_dict = {}
         pred_dict = {}
+        
+        if self.distill_mode == 2:
+            pred_dict = {
+                's_inputs': s_inputs,
+                's': s,
+                'z': z,
+            }
+            label_dict = {}
+            return pred_dict, label_dict, log_dict # student return the output to mimic the teacher
+        
+
+        
 
         # Mini-rollout: used for confidence and label permutation
         with torch.no_grad():
@@ -698,6 +730,26 @@ class Protenix(nn.Module):
             assert self.training
             assert label_dict is not None
             assert symmetric_permutation is not None
+            
+            # if is teacher, in train mode, only provide the pairwise label to regression
+            
+            if self.distill_mode == 1:
+                # student get the output from teacher to mimic
+                label_dict = {}
+                with torch.no_grad():
+                    s_inputs, s, z = self.get_pairformer_output(
+                        input_feature_dict=input_feature_dict,
+                        N_cycle=N_cycle,
+                        inplace_safe=True,
+                        chunk_size=self.configs.infer_setting.chunk_size,
+                    )
+                label_dict.update({
+                    's_inputs': s_inputs,
+                    's': s,
+                    'z': z,
+                })
+                return label_dict
+            
 
             pred_dict, label_dict, log_dict = self.main_train_loop(
                 input_feature_dict=input_feature_dict,

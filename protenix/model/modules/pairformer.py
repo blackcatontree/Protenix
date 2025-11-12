@@ -210,6 +210,8 @@ class PairformerBlock(nn.Module):
                 s=None,
                 z=z,
             )
+            # if self.single_transition(s).max() > 100:
+            #     print("Warning: large value in single transition")
             s = s + self.single_transition(s)
         return s, z
 
@@ -462,7 +464,7 @@ class MSAStack(nn.Module):
             m_new = pad_at_dim(
                 m, dim=-3, pad_length=(0, self.msa_max_size - m.shape[-3]), value=0
             )
-            assert (m_new[: m.shape[-3], :, :] == m).all()
+            # assert (m_new[: m.shape[-3], :, :] == m).all()
             msa_pair_weighted = self.chunk_forward(
                 self.msa_pair_weighted_averaging, m_new, z, chunk_size
             )

@@ -27,6 +27,14 @@ from Bio import SeqIO
 from ml_collections.config_dict import ConfigDict
 from rdkit import Chem
 
+import sys
+
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+# Add it to the start of sys.path
+sys.path.insert(0, parent_dir)
+
+
 from configs.configs_base import configs as configs_base
 from configs.configs_data import data_configs
 from configs.configs_inference import inference_configs

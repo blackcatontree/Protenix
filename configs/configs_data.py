@@ -121,7 +121,7 @@ default_weighted_pdb_configs = {
     },
 }
 
-DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/af3-dev/release_data/")
+DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/vepfs-mlp2/mlp-public/shikunfeng/Datas/Proteinix")
 
 # Use CCD cache created by scripts/gen_ccd_cache.py priority. (without date in filename)
 # See: docs/prepare_data.md
@@ -195,6 +195,25 @@ data_configs = {
             "indices_fpath": os.path.join(
                 DATA_ROOT_DIR,
                 "indices/weightedPDB_indices_before_2021-09-30_wo_posebusters_resolution_below_9.csv.gz",
+            ),
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
+    "weightedPDB_1w_prot_lig": {
+        "base_info": {
+            "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
+            "bioassembly_dict_dir": os.path.join(DATA_ROOT_DIR, "mmcif_bioassembly"),
+            "indices_fpath": os.path.join(
+                DATA_ROOT_DIR,
+                "indices/1w_prot_lig_non_bonded_sampled_data.csv.gz",
             ),
             "pdb_list": "",
             "random_sample_if_failed": True,

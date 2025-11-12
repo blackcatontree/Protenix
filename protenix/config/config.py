@@ -234,6 +234,8 @@ def parse_configs(
             "--" + key, type=str, default=ArgumentNotSet(), required=required
         )
     # Merge user commandline pargs with default ones
+    # parser.add_argument('--distill_model_type', type=str, default='', required=False)
+    
     merged_configs = manager.merge_configs(
         vars(parser.parse_args(arg_str.split())) if arg_str else {}
     )
@@ -254,7 +256,7 @@ def parse_sys_args() -> str:
     args = sys.argv[1:]
     arg_str = ""
     for k, v in zip(args[::2], args[1::2]):
-        assert k.startswith("--")
+        assert k.startswith("--"), f"Invalid argument format: expected '--' prefix but got '{k}'"
         arg_str += f"{k} {v} "
     return arg_str
 

@@ -52,6 +52,9 @@ basic_configs = {
     "eval_ema_only": False,  # whether wandb only tracking ema checkpoint metrics
     "ema_mutable_param_keywords": [""],
     "model_name": "protenix_base_default_v0.5.0",  # train model name
+    
+    # distill settings:
+    "distill_model_type": "",  # the model type for distillation, e.g., protenix_mini_esm_v0.5.0
 }
 data_configs = {
     # Data

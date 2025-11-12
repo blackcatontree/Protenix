@@ -26,6 +26,15 @@ import wandb
 from ml_collections.config_dict import ConfigDict
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
+import copy
+
+
+import sys
+
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+# Add it to the start of sys.path
+sys.path.insert(0, parent_dir)
 
 from configs.configs_base import configs as configs_base
 from configs.configs_data import data_configs
@@ -162,7 +171,21 @@ class AF3Trainer(object):
         self.lddt_metrics = LDDTMetrics(self.configs)
 
     def init_model(self):
+        if 'distill_model_config' in self.configs:
+            org_model_config = copy.deepcopy(self.configs.model)
+            self.configs.model = self.configs.distill_model_config
+            self.configs.distill_mode = 2
+            self.raw_distill_model = Protenix(self.configs).to(self.device)
+            self.configs.model = org_model_config
+            self.distill_mode = True
+            self.configs.distill_mode = 1
+        else:
+            self.configs.distill_mode = 0
+            self.distill_mode = False
+        
         self.raw_model = Protenix(self.configs).to(self.device)
+
+            
         self.use_ddp = False
         if DIST_WRAPPER.world_size > 1:
             self.print(f"Using DDP")
@@ -175,8 +198,18 @@ class AF3Trainer(object):
                 output_device=DIST_WRAPPER.local_rank,
                 static_graph=True,
             )
+            if 'distill_model_config' in self.configs:
+                self.distill_model = DDP(
+                    self.raw_distill_model,
+                    find_unused_parameters=self.configs.find_unused_parameters,
+                    device_ids=[DIST_WRAPPER.local_rank],
+                    output_device=DIST_WRAPPER.local_rank,
+                    static_graph=True,
+                )
         else:
             self.model = self.raw_model
+            if 'distill_model_config' in self.configs:
+                self.distill_model = self.raw_distill_model
 
         def count_parameters(model):
             total_params = sum(p.numel() for p in model.parameters())
@@ -306,6 +339,29 @@ class AF3Trainer(object):
                 skip_load_step=self.configs.skip_load_step,
                 load_step_for_scheduler=self.configs.load_step_for_scheduler,
             )
+        
+        if self.distill_mode:
+            # freeze self.model
+            # load the embedder part of model to distill_model
+            
+            if DIST_WRAPPER.world_size > 1:
+                src_sd = self.model.module.input_embedder.state_dict()
+                self.distill_model.module.input_embedder.load_state_dict(src_sd, strict=True)
+                
+                for p in self.distill_model.module.input_embedder.parameters():
+                    p.requires_grad = False
+                
+                self.distill_model.module.input_embedder.eval()
+                self.model.module.eval()
+            else:
+                src_sd = self.model.input_embedder.state_dict()
+                self.distill_model.input_embedder.load_state_dict(src_sd, strict=True)
+                
+                for p in self.distill_model.input_embedder.parameters():
+                    p.requires_grad = False
+                
+                self.distill_model.input_embedder.eval()
+                self.model.eval()
 
     def print(self, msg: str):
         if DIST_WRAPPER.rank == 0:
@@ -313,14 +369,74 @@ class AF3Trainer(object):
 
     def model_forward(self, batch: dict, mode: str = "train") -> tuple[dict, dict]:
         assert mode in ["train", "eval"]
-        batch["pred_dict"], batch["label_dict"], log_dict = self.model(
-            input_feature_dict=batch["input_feature_dict"],
-            label_dict=batch["label_dict"],
-            label_full_dict=batch["label_full_dict"],
-            mode=mode,
-            current_step=self.step if mode == "train" else None,
-            symmetric_permutation=self.symmetric_permutation,
-        )
+        
+        if mode == 'train' and self.distill_mode:
+            try:
+                batch['label_dict'] = self.model(
+                    input_feature_dict=batch["input_feature_dict"],
+                    label_dict=batch["label_dict"],
+                    label_full_dict=batch["label_full_dict"],
+                    mode=mode,
+                    current_step=self.step if mode == "train" else None,
+                    symmetric_permutation=self.symmetric_permutation,
+                ) # teacher return the mimic label
+                batch["pred_dict"], _, log_dict = self.distill_model(
+                    input_feature_dict=batch["input_feature_dict"],
+                    label_dict=batch["label_dict"],
+                    label_full_dict=batch["label_full_dict"],
+                    mode=mode,
+                    current_step=self.step if mode == "train" else None,
+                    symmetric_permutation=self.symmetric_permutation,
+                ) # student model return the prediction of feature
+            except Exception as e:
+                print("❌ Exception caught during model forward:")
+                print(e)
+                # 打印更完整的堆栈信息（便于调试）
+                import traceback
+                traceback.print_exc()
+
+                # 打印 batch 基本信息
+                if "basic" in batch:
+                    print("Batch basic info:")
+                    print(batch["basic"])
+                else:
+                    print("⚠️ batch['basic'] not found.")
+                
+                # 你可以选择继续抛出异常或跳过这个 batch
+                raise
+        elif mode == 'eval' and self.distill_mode:
+            batch["pred_dict"], batch["label_dict"], log_dict = self.distill_model(
+                input_feature_dict=batch["input_feature_dict"],
+                label_dict=batch["label_dict"],
+                label_full_dict=batch["label_full_dict"],
+                mode=mode,
+                current_step=self.step if mode == "train" else None,
+                symmetric_permutation=self.symmetric_permutation,
+            ) # get the z, s, etc. from student model
+
+            batch['input_feature_dict']['s_inputs'] = batch['pred_dict']['s_inputs'].detach()
+            batch['input_feature_dict']['s'] = batch['pred_dict']['s'].detach()
+            batch['input_feature_dict']['z'] = batch['pred_dict']['z'].detach()
+            
+            batch["pred_dict"], batch["label_dict"], log_dict = self.model(
+                input_feature_dict=batch["input_feature_dict"],
+                label_dict=batch["label_dict"],
+                label_full_dict=batch["label_full_dict"],
+                mode=mode,
+                current_step=self.step if mode == "train" else None,
+                symmetric_permutation=self.symmetric_permutation,
+            ) # get the z, s, etc. from student model
+            
+            
+        else: # eval model
+            batch["pred_dict"], batch["label_dict"], log_dict = self.model(
+                input_feature_dict=batch["input_feature_dict"],
+                label_dict=batch["label_dict"],
+                label_full_dict=batch["label_full_dict"],
+                mode=mode,
+                current_step=self.step if mode == "train" else None,
+                symmetric_permutation=self.symmetric_permutation,
+            )
         return batch, log_dict
 
     def get_loss(
@@ -606,6 +722,22 @@ def main():
     # update model specific configs
     configs.update(model_specfics_configs)
 
+    if configs.distill_model_type:
+        distill_model_config = ConfigDict(model_configs[configs.distill_model_type])
+        configs['distill_model_config'] = copy.deepcopy(configs['model'])
+        configs['distill_model_config'].update(distill_model_config.model)
+        
+        
+        # model_config = configs.get("model_config", {})
+
+        # # 复制缺失项
+        # for k, v in model_config.items():
+        #     if k not in distill_model_config:
+        #         distill_model_config[k] = v
+
+        # configs["distill_model_config"] = distill_model_config
+    
+    
     print(configs.run_name)
     print(configs)
     trainer = AF3Trainer(configs)

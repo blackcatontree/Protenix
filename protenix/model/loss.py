@@ -1774,6 +1774,31 @@ class ProtenixLoss(nn.Module):
         diffusion_chunk_size = self.configs.loss.diffusion_chunk_size_outer
         assert mode in ["train", "eval", "inference"]
         # Pre-computations
+        
+        if 's' in label_dict and 'z' in label_dict:  
+            def compute_losses(pred_dict, label_dict):
+                """
+                Args:
+                    pred_dict: {'s': [N, D_s], 'z': [N, N, D_z]}
+                    label_dict: same structure, same shapes
+                Returns:
+                    s_loss, z_loss, sum_loss
+                """
+                # s 部分：逐元素 L1
+                s_loss = F.l1_loss(pred_dict['s'], label_dict['s'])
+
+                # z 部分：逐元素 L1
+                z_loss = F.l1_loss(pred_dict['z'], label_dict['z'])
+
+                # 总 loss
+                sum_loss = s_loss + z_loss
+
+                return s_loss, z_loss, sum_loss
+            
+            s_loss, z_loss, sum_loss = compute_losses(pred_dict, label_dict)
+            return sum_loss, {'s_loss': s_loss, 'z_loss': z_loss}
+            
+        
         with torch.no_grad():
             label_dict = self.calculate_label(feat_dict, label_dict)
 

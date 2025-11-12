@@ -19,6 +19,7 @@ import traceback
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
+from protenix.data.esm_featurizer import ESMFeaturizer
 
 import numpy as np
 import pandas as pd
@@ -122,6 +123,31 @@ class BaseSingleDataset(Dataset):
 
         # Read data
         self.indices_list = self.read_indices_list(indices_fpath)
+        
+        
+        # protein encoder: esm
+        esm_info = kwargs.get("esm_config", {})
+        esm_info.embedding_dir = f"./esm_embeddings_train/{name}/{esm_info.model_name}"
+        esm_info.sequence_fpath = (
+            f"./esm_embeddings_train/{name}_prot_sequences.csv"
+        )
+        self.esm_enable = esm_info.get("enable", False)
+        if self.esm_enable:
+            os.makedirs(esm_info.embedding_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(esm_info.sequence_fpath), exist_ok=True)
+            # ESMFeaturizer.precompute_esm_embedding(
+            #     self.inputs,
+            #     esm_info.model_name,
+            #     esm_info.embedding_dir,
+            #     esm_info.sequence_fpath,
+            #     configs.load_checkpoint_dir,
+            # )
+            # self.esm_featurizer = ESMFeaturizer(
+            #     embedding_dir=esm_info.embedding_dir,
+            #     sequence_fpath=esm_info.sequence_fpath,
+            #     embedding_dim=esm_info.embedding_dim,
+            #     error_dir="./esm_embeddings/",
+            # )
 
     @staticmethod
     def read_pdb_list(pdb_list: Union[list, str]) -> Optional[list]:
@@ -309,7 +335,7 @@ class BaseSingleDataset(Dataset):
             A dictionary containing the processed data sample.
         """
         # Try at most 10 times
-        for _ in range(10):
+        for _ in range(50):
             try:
                 data = self.process_one(idx)
                 return data
@@ -1109,7 +1135,7 @@ def get_sample_weights(
 
 
 def get_datasets(
-    configs: ConfigDict, error_dir: Optional[str]
+    configs: ConfigDict, error_dir: Optional[str],
 ) -> tuple[WeightedMultiDataset, dict[str, BaseSingleDataset]]:
     """
     Get training and testing datasets given configs
@@ -1145,6 +1171,10 @@ def get_datasets(
     )
     train_datasets = []
     datapoint_weights = []
+    
+    
+    esm_config = configs.get("esm", None)
+    
     for train_name in data_config.train_sets:
         config_dict = data_config[train_name].to_dict()
         dataset_param = _get_dataset_param(
@@ -1154,6 +1184,7 @@ def get_datasets(
             "train_ref_pos_augment", True
         )
         dataset_param["limits"] = data_config.get("limits", -1)
+        dataset_param["esm_config"] = esm_config
         train_dataset = BaseSingleDataset(**dataset_param)
         train_datasets.append(train_dataset)
         datapoint_weights.append(
@@ -1176,6 +1207,7 @@ def get_datasets(
         dataset_param = _get_dataset_param(
             config_dict, dataset_name=test_name, stage="test"
         )
+        dataset_param["esm_config"] = esm_config
         dataset_param["ref_pos_augment"] = data_config.get("test_ref_pos_augment", True)
         test_dataset = BaseSingleDataset(**dataset_param)
         test_datasets[test_name] = test_dataset
