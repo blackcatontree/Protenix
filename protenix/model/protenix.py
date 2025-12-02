@@ -44,6 +44,15 @@ from .modules.head import DistogramHead
 from .modules.pairformer import MSAModule, PairformerStack, TemplateEmbedder
 from .modules.primitives import LinearNoBias
 
+
+from protenix.data.compute_esm import compute_ESM_embeddings, compute_esm2_embeddings_online, load_esm_model # here for the esm model loading and forwarding
+
+# load the pre-trained molecular model if needed
+from protenix.model.unimol.build_model import build_default_unimol_model
+
+from protenix.model.unimol.models.dataset import load_mols_dataset
+from rdkit import Chem
+
 logger = get_logger(__name__)
 
 
@@ -74,6 +83,37 @@ class Protenix(nn.Module):
 
         # Model
         esm_configs = configs.get("esm", {})  # This is used in InputFeatureEmbedder
+        
+        
+        # if esm_configs is not empty, load the esm model here
+        if esm_configs.get("esm_model_online", False):
+            self.esm_model, self.alphabet = load_esm_model(esm_configs['model_name'], esm_configs['local_model_path'])
+            self.esm_trainable = esm_configs.get("esm_trainable", False)
+            self.truncation_seq_length = esm_configs.get("truncation_seq_length", 4096)
+            if not self.esm_trainable:
+                for param in self.esm_model.parameters():
+                    param.requires_grad = False
+                self.esm_model.eval()
+            self.esm_model_online = True
+            logger.info("ESM model loaded successfully, load from the path {}".format(esm_configs.get('local_model_path', 'default path')))
+        else:
+            self.esm_model_online = False
+            
+            
+        # load the molecular model
+        unimol_configs = configs.get("unimol", None)
+        if unimol_configs is not None:
+            self.use_unimol = True
+            self.unimol_model = build_default_unimol_model(unimol_configs['mode'], unimol_configs['dict_path'])
+            # load the pre-trained weights
+            if 'pretrained_path' in unimol_configs:
+                unimol_state_dict = torch.load(unimol_configs['pretrained_path'], map_location='cpu')
+                missing_keys, unexpected_keys = self.unimol_model.load_state_dict(unimol_state_dict['model'], strict=False)
+                logger.info("UniMol model loaded successfully, load from the path {}".format(unimol_configs['pretrained_path']))
+                logger.info("Missing keys: {}".format(missing_keys))
+                logger.info("Unexpected keys: {}".format(unexpected_keys))
+        else:
+            self.use_unimol = False
         self.input_embedder = InputFeatureEmbedder(
             **configs.model.input_embedder, esm_configs=esm_configs
         )
@@ -724,6 +764,73 @@ class Protenix(nn.Module):
         inplace_safe = not (self.training or torch.is_grad_enabled())
         chunk_size = self.configs.infer_setting.chunk_size if inplace_safe else None
 
+        if self.esm_model_online:
+            sequences = input_feature_dict['sequences']  # list of strings
+            # pickout the protein sequences only
+            protein_entity_ids = input_feature_dict['protein_entity_ids']  # list of ints
+            # get the protein sequences
+            protein_sequences = [sequences[str(eid)] for eid in protein_entity_ids]
+            esm_embeddings = compute_esm2_embeddings_online(
+                model=self.esm_model,
+                alphabet=self.alphabet,
+                labels=protein_entity_ids,
+                sequences=protein_sequences,
+                trainable=self.esm_trainable,
+                truncation_seq_length=self.truncation_seq_length
+            )
+            input_feature_dict['esm_embeddings'] = esm_embeddings
+            # print(esm_embeddings.shape)
+        
+        if self.use_unimol:
+            # get the ligand atom and positions
+            ligand_mask = input_feature_dict['is_ligand'] == 1  # [N_Atoms,]
+            if ligand_mask.sum() > 0:
+                ligand_positions = input_feature_dict['ref_pos'][ligand_mask]  # [N_ligand_atoms, 3]
+                ligand_elements = input_feature_dict['ref_element'][ligand_mask]  # [N_ligand_atoms,
+                # 128 
+                indices = torch.argmax(ligand_elements, dim=1).detach().cpu().numpy()
+                pt = Chem.GetPeriodicTable()
+                symbols_list = [pt.GetElementSymbol(int(idx) + 1) for idx in indices]
+                symbols_np = np.array(symbols_list)
+                
+                ligand_dict = [{"atoms": symbols_np,
+                               "coordinates": ligand_positions}]
+                
+                mol_dataset = load_mols_dataset(ligand_dict, self.unimol_model.dictionary)
+                bsz = 1
+                loader = torch.utils.data.DataLoader(
+                    mol_dataset, batch_size=bsz, collate_fn=mol_dataset.collater
+                )
+                
+                with torch.no_grad():
+                    
+                    for sample in loader:
+                        # sample = unicore.utils.move_to_cuda(sample)
+                        dist = sample["net_input"]["mol_src_distance"]
+                        et   = sample["net_input"]["mol_src_edge_type"].cuda()
+                        st   = sample["net_input"]["mol_src_tokens"].cuda()
+
+                        pad = st.eq(self.unimol_model.padding_idx)
+                        x   = self.unimol_model.embed_tokens(st)
+                        n   = dist.size(-1)
+                        gbf = self.unimol_model.gbf(dist, et)
+                        gab = self.unimol_model.gbf_proj(gbf).permute(0,3,1,2).contiguous().view(-1, n, n)
+
+                        out = self.unimol_model.encoder(x, padding_mask=pad, attn_mask=gab)
+                        rep = out[0][:,0,:]                                  # [B, D]
+                        # rep = self.model.mol_project(rep)                    # [B, d_proj]
+                        # rep = rep / rep.norm(dim=-1, keepdim=True)           # cosine/IP 可互换
+                        # reps.append(rep.detach().cpu().to(torch.float32).numpy())
+                    
+                    # unimol_output = self.unimol_model(
+                    #     atom_positions=ligand_positions,
+                    #     atom_elements=ligand_elements,
+                    # )  # assume the unimol model returns a dict
+                # get the unimol embeddings
+                unimol_embeddings = unimol_output['embeddings']  # [N_ligand_atoms, unimol_dim]
+                input_feature_dict['unimol_embeddings'] = unimol_embeddings
+            
+        
         if mode == "train":
             nc_rng = np.random.RandomState(current_step)
             N_cycle = nc_rng.randint(1, self.N_cycle + 1)

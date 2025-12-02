@@ -233,4 +233,332 @@ model_configs = {
         "load_strict": False,  # For inference, it should be True.
         "use_msa": False,  # For efficiency, this model does not use MSA by default.
     },
+    "protenix_mini_esm_online_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2-3b",
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/', 
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    "protenix_mini_esm_trainable_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2-3b",
+            "esm_trainable": True,
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/', 
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    "protenix_mini_baseline_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    "protenix_mini_esm_online_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2-3b",
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/', 
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    "protenix_mini_esm_trainable_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2-3b",
+            "esm_trainable": True,
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/', 
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    "protenix_mini_esm_trainable_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2-3b",
+            "esm_trainable": True,
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/', 
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    # esm 650M training
+    "protenix_mini_esm_trainable_650m_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2_t33_650M_UR50D",
+            "esm_trainable": True,
+            "embedding_dim": 1280,
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/',
+            "truncation_seq_length": 1024, 
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    # esm 650M training
+    "protenix_mini_esm_trainable_650m_v0.1.0_unimol": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2_t33_650M_UR50D",
+            "esm_trainable": True,
+            "embedding_dim": 1280,
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/',
+            "truncation_seq_length": 1024, 
+        },
+        "unimol": {
+            "mode": "train",
+            "dict_path": "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/protenix/model/unimol/data",
+            "pretrained_path": "/vepfs-mlp2/mlp-public/shikunfeng/Datas/UniMol_Data/models/mol_pre_no_h_220816.pt",
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
+    # esm 650M freeze
+    "protenix_mini_esm_650m_v0.1.0": {
+        # "sample_diffusion": {
+        #     "gamma0": 0,
+        #     "step_scale_eta": 1.0,
+        #     "N_step": 5,
+        # },  # the default setting for mini model, we didn't change diffusion settings here
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2_t33_650M_UR50D",
+            "esm_trainable": False,
+            "embedding_dim": 1280,
+            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/', 
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+    },
 }

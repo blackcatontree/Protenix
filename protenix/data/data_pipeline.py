@@ -289,6 +289,7 @@ class DataPipeline(object):
                 msa_features or {},
                 template_features or {},
                 -1,
+                -1, # for selected_indices
             )
 
         ref_chain_indices = DataPipeline._map_ref_chain(
@@ -350,6 +351,7 @@ class DataPipeline(object):
             cropped_msa_features,
             cropped_template_features,
             reference_token_index,
+            selected_indices,
         )
 
     @staticmethod

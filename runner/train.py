@@ -66,9 +66,10 @@ class AF3Trainer(object):
         self.init_env()
         self.init_basics()
         self.init_log()
+        self.init_data()
         self.init_model()
         self.init_loss()
-        self.init_data()
+        # self.init_data()
         self.try_load_checkpoint()
 
     def init_basics(self):
@@ -196,7 +197,7 @@ class AF3Trainer(object):
                 find_unused_parameters=self.configs.find_unused_parameters,
                 device_ids=[DIST_WRAPPER.local_rank],
                 output_device=DIST_WRAPPER.local_rank,
-                static_graph=True,
+                static_graph=False,
             )
             if 'distill_model_config' in self.configs:
                 self.distill_model = DDP(
@@ -204,7 +205,7 @@ class AF3Trainer(object):
                     find_unused_parameters=self.configs.find_unused_parameters,
                     device_ids=[DIST_WRAPPER.local_rank],
                     output_device=DIST_WRAPPER.local_rank,
-                    static_graph=True,
+                    static_graph=False,
                 )
         else:
             self.model = self.raw_model

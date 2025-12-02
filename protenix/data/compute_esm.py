@@ -19,6 +19,8 @@ import pandas as pd
 import torch
 from esm import FastaBatchedDataset, pretrained
 from tqdm.auto import tqdm
+from contextlib import nullcontext
+
 
 ESM_CONFIG = {
     "esm2-3b": {
@@ -33,6 +35,12 @@ ESM_CONFIG = {
         "emb_dim": 2560,
         "n_layers": 36,
     },  # https://www.biorxiv.org/content/10.1101/2024.11.08.622579v2
+    "esm2_t33_650M_UR50D": {
+        "type": "esm2",
+        "model_path": "esm2_t33_650M_UR50D.pt",
+        "emb_dim": 1280,
+        "n_layers": 33,
+    },
 }
 
 
@@ -131,6 +139,45 @@ def compute_esm2_embeddings(
                 embeddings[label] = representation[i, 1 : truncate_len + 1].clone()
                 save_path = os.path.join(save_dir, label + ".pt")
                 torch.save(embeddings[label], save_path)
+    return embeddings
+
+
+def compute_esm2_embeddings_online(
+    model,
+    alphabet,
+    labels,
+    sequences,
+    trainable=False,
+    toks_per_batch=4096,
+    truncation_seq_length=4096,
+):
+    dataset = FastaBatchedDataset(labels, sequences)
+    batches = dataset.get_batch_indices(toks_per_batch, extra_toks_per_seq=1)
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        collate_fn=alphabet.get_batch_converter(truncation_seq_length),
+        batch_sampler=batches,
+    )
+    repr_layer = model.num_layers
+    embeddings = {}
+    
+    ctx = torch.no_grad() if not trainable else nullcontext()
+    with ctx:
+        # for batch_idx, (labels, strs, toks) in enumerate(tqdm(data_loader)):
+        for batch_idx, (labels, strs, toks) in enumerate(data_loader):
+            # print(
+            #     f"Processing {batch_idx + 1} of {len(batches)} batches ({toks.size(0)} sequences)"
+            # )
+            if torch.cuda.is_available():
+                toks = toks.to(device="cuda", non_blocking=True)
+            out = model(toks, repr_layers=[repr_layer], return_contacts=False)
+            representation = out["representations"][repr_layer].to(device="cpu")
+            for i, label in enumerate(labels):
+                embeddings[label] = torch.zeros(len(strs[i]), representation.size(-1), dtype=representation.dtype, device=representation.device)
+                truncate_len = min(truncation_seq_length, len(strs[i]))
+                embeddings[label][:truncate_len, :] = representation[i, 1 : truncate_len + 1].clone()
+            # save_path = os.path.join(save_dir, label + ".pt")
+            # torch.save(embeddings[label], save_path)
     return embeddings
 
 

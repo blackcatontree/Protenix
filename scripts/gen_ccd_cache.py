@@ -283,5 +283,6 @@ if __name__ == "__main__":
     run_update_ccd_cache(
         ccd_cache_dir=args.ccd_cache_dir,
         num_cpu=args.n_cpu,
-        disable_download=args.disable_download,
+        # disable_download=args.disable_download,
+        disable_download=1,
     )

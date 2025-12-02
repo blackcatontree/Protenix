@@ -337,6 +337,7 @@ class BaseSingleDataset(Dataset):
         # Try at most 10 times
         for _ in range(50):
             try:
+                # idx = 2332
                 data = self.process_one(idx)
                 return data
             except Exception as e:
@@ -356,6 +357,8 @@ class BaseSingleDataset(Dataset):
         self, idx: int
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         sample_indice = self._get_sample_indice(idx=idx)
+        # sample_indice.pdb_id = '3jb0'
+        
         if self.bioassembly_dict_dir is not None:
             bioassembly_dict_fpath = os.path.join(
                 self.bioassembly_dict_dir, sample_indice.pdb_id + ".pkl.gz"
@@ -461,10 +464,44 @@ class BaseSingleDataset(Dataset):
         Returns:
             A dict containing the input features, labels, basic_info and optionally the processed atom and token arrays.
         """
-
+        # idx = 2333
         sample_indice, bioassembly_dict, bioassembly_dict_fpath = (
             self._get_bioassembly_data(idx=idx)
         )
+        
+        # sample code to get the token and protein sequence correspondence
+        
+        
+        token_num = len(bioassembly_dict["token_array"])
+        
+        esm_embeddings_dim = 1280
+        x = torch.zeros([token_num, esm_embeddings_dim])
+        
+        token_centre_atom_indices = bioassembly_dict["token_array"].get_annotation(
+                "centre_atom_index"
+        )
+        centre_atom_array = bioassembly_dict["atom_array"][token_centre_atom_indices]
+        is_protein = centre_atom_array.is_protein.astype(bool)
+        # print('is_protein shape:', is_protein)
+        # print('entity ids shape:', centre_atom_array.label_entity_id)
+        protein_entity_ids = set(centre_atom_array.label_entity_id[is_protein])
+        # iterate the entity_ids to get sequences, get the esm feature
+        # for entity_id in protein_entity_ids:
+        #     continue
+        #     sequence = bioassembly_dict["sequences"][str(entity_id)]
+        #     # x_esm = self.esm_featurizer.load_esm_embedding(sequence)
+        #     # print(f"entity_id: {entity_id}, sequence: {sequence}, esm feature shape: {x_esm.shape}")
+        #     # get the residue id
+        #     # res_idx =
+        #     entity_protein_mask = (centre_atom_array.label_entity_id == entity_id)
+            
+        #     # entity_atom_array = centre_atom_array[
+        #     #     centre_atom_array.label_entity_id == entity_id
+        #     # ]
+        #     res_idx = entity_atom_array.res_id - 1  # res_id starts with 1
+        #     x[entity_protein_mask] = x_esm[res_idx]
+            
+        
 
         if self.use_reference_chains_only:
             # Get the reference chains
@@ -516,6 +553,7 @@ class BaseSingleDataset(Dataset):
             cropped_msa_features,
             cropped_template_features,
             reference_token_index,
+            selected_indices,
         ) = self.crop(
             sample_indice=sample_indice,
             bioassembly_dict=bioassembly_dict,
@@ -533,6 +571,41 @@ class BaseSingleDataset(Dataset):
             max_entity_mol_id=max_entity_mol_id,
         )
 
+        # pass the orginal tokens 
+        # feat['org_token_num'] = token_num # the token number before cropping
+        # feat['select_tokens'] = selected_indices # the selected token indices after cropping
+        feat['sequences'] = bioassembly_dict["sequences"] # esm embedding for all tokens
+        feat['protein_entity_ids'] = protein_entity_ids
+        
+        # print(f'protein sequence entity ids: {protein_entity_ids}')
+        # print(f'sequences: {bioassembly_dict["sequences"]}')
+        
+        # Construct an index list that maps each token to its corresponding ESM embedding index.
+        full_token_map_idx = np.zeros((token_num, 2)) - 1  # initialize with -1
+        for entity_id in protein_entity_ids:
+            sequence = bioassembly_dict["sequences"][str(entity_id)]
+            # x_esm = self.esm_featurizer.load_esm_embedding(sequence)
+            # print(f"entity_id: {entity_id}, sequence: {sequence}, esm feature shape: {x_esm.shape}")
+            # get the residue id
+            # res_idx =
+            entity_protein_mask = (centre_atom_array.label_entity_id == entity_id)
+            
+            entity_atom_array = centre_atom_array[
+                centre_atom_array.label_entity_id == entity_id
+            ]
+            res_idx = entity_atom_array.res_id - 1  # res_id starts with 1
+            token_map_idx = [[x, entity_id] for x in res_idx]
+            full_token_map_idx[entity_protein_mask] = token_map_idx
+        
+        if isinstance(selected_indices, torch.Tensor):
+            feat['esm_token_map_idx'] = full_token_map_idx[selected_indices] # cropped
+        else:
+            feat['esm_token_map_idx'] = full_token_map_idx # no cropping, for example, test set
+        feat['protein_entity_ids'] = protein_entity_ids
+        # feat['centre_atom_array'] = centre_atom_array
+        
+        
+        
         # Basic info, e.g. dimension related items
         basic_info = {
             "pdb_id": (
@@ -1186,6 +1259,8 @@ def get_datasets(
         dataset_param["limits"] = data_config.get("limits", -1)
         dataset_param["esm_config"] = esm_config
         train_dataset = BaseSingleDataset(**dataset_param)
+        # for debug:
+        test_data = train_dataset[0]
         train_datasets.append(train_dataset)
         datapoint_weights.append(
             get_sample_weights(

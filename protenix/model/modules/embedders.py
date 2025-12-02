@@ -100,6 +100,18 @@ class InputFeatureEmbedder(nn.Module):
 
         if self.esm_configs["enable"]:
             # Add esm embedding to s_inputs if enable.
+            # get the esm_embeddings
+            if 'esm_token_map_idx' in input_feature_dict:
+                esm_token_embedding = torch.zeros(size=(s_inputs.shape[0], self.esm_configs["embedding_dim"]), dtype=s_inputs.dtype, device=s_inputs.device)
+                esm_token_map_idx = input_feature_dict["esm_token_map_idx"]
+        
+                
+                for i in range(s_inputs.shape[0]):
+                    if esm_token_map_idx[i][0] < 0:
+                        continue
+                    esm_token_embedding[i] = input_feature_dict["esm_embeddings"][str(int(esm_token_map_idx[i][1]))][int(esm_token_map_idx[i][0])]
+                input_feature_dict["esm_token_embedding"] = esm_token_embedding
+            
             esm_embeddings = self.linear_esm(input_feature_dict["esm_token_embedding"])
             s_inputs = s_inputs + esm_embeddings
 
