@@ -619,6 +619,7 @@ class CropData(object):
             cropped_atom_array,
             cropped_msa_features,
             cropped_template_features,
+            cropped_atom_indices,
         )
 
     def get_crop_indices(self, crop_method: str = None) -> torch.Tensor:

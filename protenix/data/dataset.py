@@ -336,21 +336,23 @@ class BaseSingleDataset(Dataset):
         """
         # Try at most 10 times
         for _ in range(50):
-            try:
-                # idx = 2332
-                data = self.process_one(idx)
-                return data
-            except Exception as e:
-                error_message = f"{e} at idx {idx}:\n{traceback.format_exc()}"
-                self.save_error_data(idx, error_message)
+            data = self.process_one(idx)
+            return data
+            # try:
+            #     # idx = 2332
+            #     # data = self.process_one(idx)
+            #     # return data
+            # except Exception as e:
+            #     error_message = f"{e} at idx {idx}:\n{traceback.format_exc()}"
+            #     self.save_error_data(idx, error_message)
 
-                if self.random_sample_if_failed:
-                    logger.exception(f"[skip data {idx}] {error_message}")
-                    # Random sample an index
-                    idx = random.choice(range(len(self.indices_list)))
-                    continue
-                else:
-                    raise Exception(e)
+            #     if self.random_sample_if_failed:
+            #         logger.exception(f"[skip data {idx}] {error_message}")
+            #         # Random sample an index
+            #         idx = random.choice(range(len(self.indices_list)))
+            #         continue
+            #     else:
+            #         raise Exception(e)
         return data
 
     def _get_bioassembly_data(
@@ -472,6 +474,18 @@ class BaseSingleDataset(Dataset):
         # sample code to get the token and protein sequence correspondence
         
         
+        # rdkit coordinate
+        if 'pdbbind' in self.name:
+            rdkit_coords = bioassembly_dict['rdkit_coords']
+            apo_coords = bioassembly_dict['apo_coords']
+            rdkit_idx = np.random.randint(rdkit_coords.shape[0])
+            rdkit_coords = rdkit_coords[rdkit_idx]
+            # align to the original point
+            rdkit_coords = rdkit_coords - rdkit_coords.mean(axis=0)
+            apo_coords = apo_coords - apo_coords.mean(axis=0)
+            complex_apo_coords = np.concatenate((apo_coords, rdkit_coords), axis=0)
+            bioassembly_dict['apo_atom_array'] = complex_apo_coords
+        
         token_num = len(bioassembly_dict["token_array"])
         
         esm_embeddings_dim = 1280
@@ -554,6 +568,7 @@ class BaseSingleDataset(Dataset):
             cropped_template_features,
             reference_token_index,
             selected_indices,
+            cropped_atom_indices,
         ) = self.crop(
             sample_indice=sample_indice,
             bioassembly_dict=bioassembly_dict,
@@ -574,6 +589,11 @@ class BaseSingleDataset(Dataset):
         # pass the orginal tokens 
         # feat['org_token_num'] = token_num # the token number before cropping
         # feat['select_tokens'] = selected_indices # the selected token indices after cropping
+        if 'pdbbind' in self.name:
+            feat['apo_atom_array'] = torch.tensor(complex_apo_coords, dtype=feat['ref_pos'].dtype)
+            if self.cropping_configs['crop_size'] > -1:
+                feat['apo_atom_array'] = feat['apo_atom_array'][cropped_atom_indices]
+                 
         feat['sequences'] = bioassembly_dict["sequences"] # esm embedding for all tokens
         feat['protein_entity_ids'] = protein_entity_ids
         
