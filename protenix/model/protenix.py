@@ -24,8 +24,12 @@ from protenix.model import sample_confidence
 from protenix.model.generator import (
     InferenceNoiseScheduler,
     TrainingNoiseSampler,
+    RealUniformSampler,
     sample_diffusion,
+    sample_diffusion_ddbm,
     sample_diffusion_training,
+    sample_diffusion_training_ddbm,
+    
 )
 from protenix.model.utils import simple_merge_dict_list
 from protenix.openfold_local.model.primitives import LayerNorm
@@ -75,7 +79,15 @@ class Protenix(nn.Module):
             assert configs.loss.weight.alpha_distogram == 0.0
 
         # Diffusion scheduler
-        self.train_noise_sampler = TrainingNoiseSampler(**configs.train_noise_sampler)
+        self.ddbm = configs.ddbm
+        if self.ddbm:
+            self.train_noise_sampler = RealUniformSampler()
+            configs.inference_noise_scheduler.sigma_data = 1.0
+            configs.inference_noise_scheduler.s_min = 0.0001
+            configs.inference_noise_scheduler.s_max = 0.9999
+            configs.inference_noise_scheduler.rho = 7
+        else:
+            self.train_noise_sampler = TrainingNoiseSampler(**configs.train_noise_sampler)
         self.inference_noise_scheduler = InferenceNoiseScheduler(
             **configs.inference_noise_scheduler
         )
@@ -332,9 +344,21 @@ class Protenix(nn.Module):
                 ),
             }
         )
-        return autocasting_disable_decorator(self.configs.skip_amp.sample_diffusion)(
-            sample_diffusion
-        )(**_configs, **kwargs)
+    
+        
+        
+        if self.ddbm:
+            _configs.update(
+                {
+                    "ddbm_configs": self.configs.ddbm_configs,
+                })
+            return autocasting_disable_decorator(self.configs.skip_amp.sample_diffusion)(
+                sample_diffusion_ddbm
+            )(**_configs, **kwargs)
+        else:
+            return autocasting_disable_decorator(self.configs.skip_amp.sample_diffusion)(
+                sample_diffusion
+            )(**_configs, **kwargs)
 
     def run_confidence_head(self, *args, **kwargs):
         """
@@ -699,20 +723,50 @@ class Protenix(nn.Module):
         drop_conditioning = (
             random.random() < self.configs.model.condition_embedding_drop_rate
         )
-        _, x_denoised, x_noise_level = autocasting_disable_decorator(
-            self.configs.skip_amp.sample_diffusion_training
-        )(sample_diffusion_training)(
-            noise_sampler=self.train_noise_sampler,
-            denoise_net=self.diffusion_module,
-            label_dict=label_dict,
-            input_feature_dict=input_feature_dict,
-            s_inputs=s_inputs,
-            s_trunk=s,
-            z_trunk=z,
-            N_sample=N_sample,
-            diffusion_chunk_size=self.configs.diffusion_chunk_size,
-            use_conditioning=not drop_conditioning,
-        )
+        if self.ddbm:
+            # _, x_denoised, x_noise_level, mse_weights = sample_diffusion_training_ddbm(
+            #     noise_sampler=self.train_noise_sampler,
+            #     denoise_net=self.diffusion_module,
+            #     label_dict=label_dict,
+            #     input_feature_dict=input_feature_dict,
+            #     s_inputs=s_inputs,
+            #     s_trunk=s,
+            #     z_trunk=z,
+            #     N_sample=N_sample,
+            #     diffusion_chunk_size=self.configs.diffusion_chunk_size,
+            #     use_conditioning=not drop_conditioning,
+            #     ddbm_configs=self.configs.ddbm_configs,
+            # )
+            _, x_denoised, x_noise_level, mse_weights = autocasting_disable_decorator(
+                self.configs.skip_amp.sample_diffusion_training
+            )(sample_diffusion_training_ddbm)(
+                noise_sampler=self.train_noise_sampler,
+                denoise_net=self.diffusion_module,
+                label_dict=label_dict,
+                input_feature_dict=input_feature_dict,
+                s_inputs=s_inputs,
+                s_trunk=s,
+                z_trunk=z,
+                N_sample=N_sample,
+                diffusion_chunk_size=self.configs.diffusion_chunk_size,
+                use_conditioning=not drop_conditioning,
+                ddbm_configs=self.configs.ddbm_configs,
+            )
+        else:
+            _, x_denoised, x_noise_level = autocasting_disable_decorator(
+                self.configs.skip_amp.sample_diffusion_training
+            )(sample_diffusion_training)(
+                noise_sampler=self.train_noise_sampler,
+                denoise_net=self.diffusion_module,
+                label_dict=label_dict,
+                input_feature_dict=input_feature_dict,
+                s_inputs=s_inputs,
+                s_trunk=s,
+                z_trunk=z,
+                N_sample=N_sample,
+                diffusion_chunk_size=self.configs.diffusion_chunk_size,
+                use_conditioning=not drop_conditioning,
+            )
         pred_dict.update(
             {
                 "distogram": autocasting_disable_decorator(True)(self.distogram_head)(
@@ -723,6 +777,12 @@ class Protenix(nn.Module):
                 "noise_level": x_noise_level,
             }
         )
+        if self.ddbm:
+            pred_dict.update(
+                {
+                    "mse_weights": mse_weights,
+                }
+            )
 
         # Permute symmetric atom/chain in each sample to match true structure
         # Note: currently chains cannot be permuted since label is cropped

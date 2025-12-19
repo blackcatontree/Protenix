@@ -1587,9 +1587,12 @@ class ProtenixLoss(nn.Module):
             confidence_coordinate = "coordinate_mini"
             if not self.configs.train_confidence_only:
                 # Scale diffusion loss with noise-level
-                diffusion_per_sample_scale = (
-                    pred_dict["noise_level"] ** 2 + self.configs.sigma_data**2
-                ) / (self.configs.sigma_data * pred_dict["noise_level"]) ** 2
+                if self.configs.ddbm:
+                    diffusion_per_sample_scale = pred_dict['mse_weights']
+                else:
+                    diffusion_per_sample_scale = (
+                        pred_dict["noise_level"] ** 2 + self.configs.sigma_data**2
+                    ) / (self.configs.sigma_data * pred_dict["noise_level"]) ** 2
 
         else:
             # Confidence Loss: use diffusion coordinates

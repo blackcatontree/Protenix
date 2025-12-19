@@ -27,6 +27,7 @@ from ml_collections.config_dict import ConfigDict
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 import copy
+import numpy as np
 
 
 import sys
@@ -94,6 +95,8 @@ class AF3Trainer(object):
         self.error_dir = f"{self.run_dir}/errors"
 
         if DIST_WRAPPER.rank == 0:
+            self.print("rank 0 creating directories")
+            # import pdb; pdb.set_trace()
             os.makedirs(self.run_dir)
             os.makedirs(self.checkpoint_dir)
             os.makedirs(self.prediction_dir)
@@ -104,6 +107,9 @@ class AF3Trainer(object):
                 self.configs,
                 os.path.join(self.configs.base_dir, self.run_name, "config.yaml"),
             )
+        dist.barrier()
+
+            
 
         self.print(
             f"Using run name: {self.run_name}, run dir: {self.run_dir}, checkpoint_dir: "
@@ -461,6 +467,14 @@ class AF3Trainer(object):
         lddt_dict = self.lddt_metrics.compute_lddt(
             batch["pred_dict"], batch["label_dict"]
         )
+        # calculate the coordinate of ligand
+        if 'interested_ligand_mask' in batch['label_dict']:
+            complex_gt = batch['label_dict']['coordinate']
+            complex_pred = batch['pred_dict']['coordinate']
+            ligand_mask = batch['label_dict']['interested_ligand_mask']
+            
+            rmsd_dict = self.lddt_metrics.compute_ligand_rmsd_with_kabsch(complex_gt.cpu().numpy(),  complex_pred.cpu().numpy(), ligand_mask[0].cpu().numpy().astype(bool))
+            return lddt_dict, rmsd_dict
 
         return lddt_dict
 
@@ -502,6 +516,9 @@ class AF3Trainer(object):
             self.print(f"Testing on {test_name}")
             evaluated_pids = []
             total_batch_num = len(test_dl)
+            if test_name in ['posebusters_0925', "pdbbind_test"]:
+                ligand_rmsds = []
+            
             for index, batch in enumerate(tqdm(test_dl)):
                 batch = to_device(batch, self.device)
                 pid = batch["basic"]["pdb_id"]
@@ -524,7 +541,14 @@ class AF3Trainer(object):
                     # Loss forward
                     loss, loss_dict, batch = self.get_loss(batch, mode="eval")
                     # lDDT metrics
-                    lddt_dict = self.get_metrics(batch)
+                    if 'interested_ligand_mask' in batch['label_dict']:
+                        lddt_dict, rmsd_dict = self.get_metrics(batch)
+                        ligand_rmsds.extend(rmsd_dict['ligand_rmsds'])
+                    else:
+                        lddt_dict = self.get_metrics(batch)
+                    
+                    
+                    
                     lddt_metrics = self.aggregate_metrics(lddt_dict, batch)
                     simple_metrics.update(
                         {k: v for k, v in lddt_metrics.items() if "diff" not in k}
@@ -543,6 +567,13 @@ class AF3Trainer(object):
                     torch.cuda.empty_cache()
 
             metrics = simple_metric_wrapper.calc()
+            
+            if test_name in ['posebusters_0925', "pdbbind_test"]: # calculate the mean rmsd and rmsd < 2 or 5 A ratio
+                ratio_lt_2A = np.mean(np.array(ligand_rmsds) < 2.0)
+                ratio_lt_5A = np.mean(np.array(ligand_rmsds) < 5.0)
+                mean_rmsd = np.mean(ligand_rmsds)
+                self.print(f'ratio 2A:  {ratio_lt_2A}; ratio 5A: {ratio_lt_5A}, mean_rmsd: {mean_rmsd}')
+            
             self.print(f"Step {self.step}, eval {test_name}: {metrics}")
             if self.configs.use_wandb and DIST_WRAPPER.rank == 0:
                 wandb.log(metrics, step=self.step)
