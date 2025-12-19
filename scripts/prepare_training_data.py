@@ -21,6 +21,10 @@ import pandas as pd
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 from protenix.data.data_pipeline import DataPipeline
 from protenix.utils.file_io import dump_gzip_pickle
 
@@ -47,6 +51,8 @@ def gen_a_bioassembly_data(
         dataset = "Distillation"
     else:
         dataset = "WeightedPDB"
+
+    # mmcif = '/vepfs-mlp2/mlp-public/shikunfeng/Datas/PDBBIND_atomCorrected/5eiw/5eiw_merged.cif'
 
     sample_indices_list, bioassembly_dict = DataPipeline.get_data_from_mmcif(
         mmcif, cluster_file, dataset
