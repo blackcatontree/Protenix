@@ -285,11 +285,12 @@ data_configs = {
         "base_info": {
             "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
             "bioassembly_dict_dir": os.path.join(
-                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
-                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
             ),
             "indices_fpath": os.path.join(
-                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_train.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
                 # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_ligand_pdbbind_complex.csv"
             ),
             "pdb_list": "",
@@ -315,10 +316,13 @@ data_configs = {
         "base_info": {
             "mmcif_dir": os.path.join(DATA_ROOT_DIR, "mmcif"),
             "bioassembly_dict_dir": os.path.join(
-                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
-                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind"
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/pdbbind_tmp"
             ),
-            "indices_fpath": "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
+            "indices_fpath": 
+                "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protien_ligand_pdbbind_test_multichain.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/v1_data/protein_ligand_pdbbind_test.csv",
+                # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_liagnd_pdbbind_tmp.csv",
                 # "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/tools/protein_ligand_pdbbind_complex_200.csv",
             "pdb_list": "",
             "find_pocket": True,

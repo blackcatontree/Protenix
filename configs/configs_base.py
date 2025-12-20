@@ -154,12 +154,36 @@ model_configs = {
         "p_std": 1.5,
         "sigma_data": 16.0,  # NOTE: in EDM, this is 1.0
     },
-    "inference_noise_scheduler": {
-        "s_max": 160.0,
-        "s_min": 4e-4,
-        "rho": 7,
-        "sigma_data": 16.0,  # NOTE: in EDM, this is 1.0
+    "ddbm": False,
+    "ddbm_configs": {
+    #   "pred_mode": "ve",
+    #   "sigma_max": 1.0,
+    #   "sigma_min":0.0001,
+    #   "sigma_data": 0.5,
+    #   "cov_xy": 0,
+    #   "c": 1,
+    #   "weight_schedule":"bridge_karras",  
+      "pred_mode": "vp",
+      "sigma_max": 1.0,
+      "sigma_min":0.0001,
+      "sigma_data": 0.5,
+      "sigma_data_end": 0.5,
+      "cov_xy": 0,
+      "c": 1,
+      "beta_d": 2,
+      "beta_min": 0.1,
+      "weight_schedule":"bridge_karras",  
+      
+      "rho":7,
+      "churn_step_ratio": 0.33,
+      "guidance": 1,
     },
+    # "inference_noise_scheduler": {
+    #     "s_max": 160.0,
+    #     "s_min": 4e-4,
+    #     "rho": 7,
+    #     "sigma_data": 16.0,  # NOTE: in EDM, this is 1.0
+    # },
     "sample_diffusion": {
         "gamma0": 0.8,
         "gamma_min": 1.0,
@@ -179,6 +203,7 @@ model_configs = {
             "c_atom": GlobalConfigValue("c_atom"),
             "c_atompair": GlobalConfigValue("c_atompair"),
             "c_token": GlobalConfigValue("c_token"),
+            "use_apo_pos": False,
         },
         "relative_position_encoding": {
             "r_max": 32,
@@ -259,6 +284,7 @@ model_configs = {
                 "n_heads": 4,
             },
             "blocks_per_ckpt": GlobalConfigValue("blocks_per_ckpt"),
+            "use_apo_pos": False,
         },
         "confidence_head": {
             "c_z": GlobalConfigValue("c_z"),

@@ -81,16 +81,26 @@ class Protenix(nn.Module):
         # Diffusion scheduler
         self.ddbm = configs.ddbm
         if self.ddbm:
-            self.train_noise_sampler = RealUniformSampler()
-            configs.inference_noise_scheduler.sigma_data = 1.0
-            configs.inference_noise_scheduler.s_min = 0.0001
-            configs.inference_noise_scheduler.s_max = 0.9999
-            configs.inference_noise_scheduler.rho = 7
+            self.train_noise_sampler = RealUniformSampler(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
+            
+            inference_noise_schedule = {}
+            inference_noise_schedule['s_min'] = configs.ddbm_configs['sigma_min']
+            inference_noise_schedule['s_max'] = configs.ddbm_configs['sigma_max']
+            inference_noise_schedule['sigma_data'] = configs.ddbm_configs['sigma_data']
+            inference_noise_schedule['rho'] = configs.ddbm_configs['rho']
+            self.inference_noise_scheduler = InferenceNoiseScheduler(
+                **inference_noise_schedule
+            )
+            
+            # configs.inference_noise_scheduler.sigma_data = 1.0
+            # configs.inference_noise_scheduler.s_min = 0.0001
+            # configs.inference_noise_scheduler.s_max = 0.9999
+            # configs.inference_noise_scheduler.rho = 7
         else:
             self.train_noise_sampler = TrainingNoiseSampler(**configs.train_noise_sampler)
-        self.inference_noise_scheduler = InferenceNoiseScheduler(
-            **configs.inference_noise_scheduler
-        )
+            self.inference_noise_scheduler = InferenceNoiseScheduler(
+                **configs.inference_noise_scheduler
+            )
         self.diffusion_batch_size = self.configs.diffusion_batch_size
 
         # Model

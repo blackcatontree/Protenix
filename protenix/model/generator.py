@@ -568,8 +568,14 @@ def sample_diffusion_ddbm(
     x_l, path, nfe = sample_heun(denoise_net,
             x_T,
             noise_schedule,
-            pred_mode='vp',
-            progress=False,)
+            pred_mode=ddbm_configs["pred_mode"],
+            progress=False,
+            sigma_max=ddbm_configs["sigma_max"],
+            beta_d=ddbm_configs["beta_d"],
+            beta_min=ddbm_configs["beta_min"],
+            churn_step_ratio=ddbm_configs.get("churn_step_ratio", 0.33),
+            guidance=ddbm_configs.get("guidance", 1),
+            )
     # if diffusion_chunk_size is None:
         # x_l = _chunk_sample_diffusion(N_sample, inplace_safe=inplace_safe)
     # else:
@@ -887,7 +893,7 @@ def sample_diffusion_training_ddbm(
 
 def get_snr(ddbm_configs, sigmas):
     if ddbm_configs["pred_mode"].startswith('vp'):
-        return vp_logsnr(sigmas, self.beta_d, self.beta_min).exp()
+        return vp_logsnr(sigmas, ddbm_configs['beta_d'], ddbm_configs['beta_min']).exp()
     else:
         return sigmas**-2
 
