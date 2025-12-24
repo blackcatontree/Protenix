@@ -143,3 +143,5 @@ protenix/model/tri_attention/TriAttentionCache/*
 tmp*
 
 *.gz
+*.cif
+*.csv

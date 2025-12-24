@@ -66,6 +66,49 @@ RDKitBond2Biotite = {
 }
 
 
+def rdkit_bond_to_biotite(bond: Chem.Bond) -> BondType:
+    """
+    Map RDKit bond to biotite BondType.
+    """
+    if bond is None:
+        return BondType.ANY
+
+    rdkit_type = bond.GetBondType()
+    is_aromatic = bond.GetIsAromatic()
+
+    # Coordination / dative bonds
+    if rdkit_type in (
+        Chem.BondType.DATIVE,
+        Chem.BondType.DATIVEONE,
+        Chem.BondType.DATIVEL,
+        Chem.BondType.DATIVER,
+    ):
+        return BondType.COORDINATION
+
+    # Aromatic bonds
+    if is_aromatic:
+        if rdkit_type == Chem.BondType.SINGLE:
+            return BondType.AROMATIC_SINGLE
+        elif rdkit_type == Chem.BondType.DOUBLE:
+            return BondType.AROMATIC_DOUBLE
+        elif rdkit_type == Chem.BondType.TRIPLE:
+            return BondType.AROMATIC_TRIPLE
+        else:
+            return BondType.AROMATIC
+
+    # Non-aromatic bonds
+    if rdkit_type == Chem.BondType.SINGLE:
+        return BondType.SINGLE
+    elif rdkit_type == Chem.BondType.DOUBLE:
+        return BondType.DOUBLE
+    elif rdkit_type == Chem.BondType.TRIPLE:
+        return BondType.TRIPLE
+    elif rdkit_type == Chem.BondType.QUADRUPLE:
+        return BondType.QUADRUPLE
+
+    return BondType.ANY
+
+
 logger = logging.getLogger(__name__)
 
 # Ignore inter residue metal coordinate bonds in mmcif _struct_conn
@@ -748,9 +791,9 @@ class MMCIFParser:
                 aa, self.entity_poly_type
             ),
             # Note: Filter.remove_polymer_chains_too_short not being used
-            lambda aa: Filter.remove_polymer_chains_with_consecutive_c_alpha_too_far_away(
-                aa, self.entity_poly_type
-            ),
+            # lambda aa: Filter.remove_polymer_chains_with_consecutive_c_alpha_too_far_away(
+            #     aa, self.entity_poly_type
+            # ),
             self.fix_arginine,
             self.add_missing_atoms_and_residues,  # and add annotation is_resolved (False for missing atoms)
             Filter.remove_element_X,  # remove X element (including ASX->ASP, GLX->GLU) after add_missing_atoms_and_residues()
@@ -912,8 +955,14 @@ class MMCIFParser:
         # rdkit_mol_path = self.cif.block["my_category"]["rdkit_ligand"].as_array()[0]
         # protein_path = self.cif.block["my_category"]["apo_protein"].as_array()[0]
         
-        rdkit_mol_path = self.cif.block["my_category"]["apo_protein"].as_array()[0]
-        protein_path = self.cif.block["my_category"]["rdkit_ligand"].as_array()[0]
+        path1 = self.cif.block["my_category"]["apo_protein"].as_array()[0]
+        path2 = self.cif.block["my_category"]["rdkit_ligand"].as_array()[0]
+        if path1.endswith(".pdb"):
+            protein_path = path1
+            rdkit_mol_path = path2
+        else:
+            protein_path = path2
+            rdkit_mol_path = path1
 
         # created AtomArray of first model from mmcif atom_site (Asymmetric Unit)
         atom_array = self.get_structure()
@@ -932,9 +981,12 @@ class MMCIFParser:
         
         
         # read the sdf
-        suppl = Chem.SDMolSupplier(rdkit_mol_path, removeHs=False)
+        # rdkit_mol_path = "/vepfs-mlp2/mlp-public/shikunfeng/Datas/PDBBIND_atomCorrected/6ibz/6ibz_ligand.sdf"
+        suppl = Chem.SDMolSupplier(rdkit_mol_path, removeHs=False, sanitize=True)
         mols = [m for m in suppl]
         mol = mols[0]
+        Chem.Kekulize(mol, clearAromaticFlags=False)
+        # mol = Chem.RemoveHs(mol)
         atoms = mol.GetAtoms()
         
         mask = atom_array.res_name == 'UNL'
@@ -942,16 +994,21 @@ class MMCIFParser:
         indices = np.where(mask)[0]  # np.where返回元组，[0]取一维索引
 
         bond_list = atom_array.bonds
+        aa_list = []
         for bond in mol.GetBonds():
             i = indices[bond.GetBeginAtomIdx()]
             j = indices[bond.GetEndAtomIdx()]
 
-            bond_type = RDKitBond2Biotite.get(
-                bond.GetBondType(),
-                BondType.SINGLE,  # fallback
-            )
+            
+            # bond_type = RDKitBond2Biotite.get(
+            #     bond.GetBondType(),
+            #     BondType.SINGLE,  # fallback
+            # )
+            
+            biotite_type = rdkit_bond_to_biotite(bond)
+            aa_list.append((i, j, biotite_type))
 
-            bond_list.add_bond(i, j, bond_type)
+            bond_list.add_bond(i, j, biotite_type)
         
         
         # get all atom non-h idx

@@ -106,6 +106,18 @@ def get_interface_token(
     mask = mask_distance * mask_diff_chain * token_distance_mask
     mask_interface = torch.sum(mask, dim=-1)
     interface_token_indices = torch.nonzero(mask_interface, as_tuple=True)[0]
+    if interface_token_indices.numel() == 0:
+        # only consider valid & different-chain distances
+        valid_mask = mask_diff_chain * token_distance_mask
+        masked_dist = token_distance.masked_fill(~valid_mask.to(torch.bool), float("inf"))
+
+        min_dist_per_token, _ = masked_dist.min(dim=-1)
+
+        # pick top-K closest tokens
+        K = min(8, min_dist_per_token.numel())
+        interface_token_indices = torch.topk(
+            -min_dist_per_token, k=K
+        ).indices
     return interface_token_indices
 
 

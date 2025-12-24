@@ -61,6 +61,9 @@ class DataPipeline(object):
         # try:
         if dataset == "WeightedPDB":
             parser = MMCIFParser(mmcif_file=mmcif)
+            bioassembly_dict = parser.get_bioassembly()
+        elif dataset == "pdbbind":
+            parser = MMCIFParser(mmcif_file=mmcif)
             mmcif2 = mmcif.replace(".cif", '_fake.cif')
             parser2 = MMCIFParser(mmcif_file=mmcif2)
             pdb_id = mmcif.split('/')[-2]

@@ -34,6 +34,7 @@ def gen_a_bioassembly_data(
     bioassembly_output_dir: Path,
     cluster_file: Optional[Path],
     distillation: bool = False,
+    pdbbind: bool = False
 ) -> Optional[list[dict]]:
     """
     Generates bioassembly data from an mmCIF file and saves it to the specified output directory.
@@ -49,6 +50,8 @@ def gen_a_bioassembly_data(
     """
     if distillation:
         dataset = "Distillation"
+    elif pdbbind:
+        dataset = 'pdbbind'
     else:
         dataset = "WeightedPDB"
 
@@ -71,6 +74,7 @@ def gen_data_from_mmcifs(
     bioassembly_output_dir: Path,
     cluster_file: Optional[Path],
     distillation: bool = False,
+    pdbbind: bool = False,
     num_workers: int = 1,
 ):
     """
@@ -90,7 +94,7 @@ def gen_data_from_mmcifs(
         for r in tqdm(
             Parallel(n_jobs=num_workers, return_as="generator_unordered")(
                 delayed(gen_a_bioassembly_data)(
-                    mmcif, bioassembly_output_dir, cluster_file, distillation
+                    mmcif, bioassembly_output_dir, cluster_file, distillation, pdbbind
                 )
                 for mmcif in mmcif_list
             ),
@@ -113,6 +117,7 @@ def run_gen_data(
     bioassembly_output_dir: Path,
     cluster_file: Optional[Path],
     distillation: bool = False,
+    pdbbind: bool = False,
     num_workers: int = 1,
 ):
     """
@@ -152,6 +157,7 @@ def run_gen_data(
         bioassembly_output_dir,
         cluster_file,
         distillation,
+        pdbbind,
         num_workers,
     )
 
@@ -193,6 +199,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use the 'Distillation' setting",
     )
+    
+    
+    parser.add_argument(
+        "-p",
+        "--pdbbind",
+        action="store_true",
+        help="customized for pdbbind dataset",
+    )
 
     parser.add_argument(
         "-n",
@@ -210,5 +224,6 @@ if __name__ == "__main__":
         bioassembly_output_dir=args.bio_output_dir,
         cluster_file=args.cluster_file,
         distillation=args.distillation,
+        pdbbind=args.pdbbind,
         num_workers=args.n_cpu,
     )

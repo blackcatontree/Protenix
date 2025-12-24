@@ -485,6 +485,26 @@ class BaseSingleDataset(Dataset):
             apo_coords = apo_coords - apo_coords.mean(axis=0)
             complex_apo_coords = np.concatenate((apo_coords, rdkit_coords), axis=0)
             bioassembly_dict['apo_atom_array'] = complex_apo_coords
+            
+            # ref_mask all set to 1
+            n_atoms = len(bioassembly_dict['atom_array'].ref_mask)
+            bioassembly_dict['atom_array'].ref_mask = np.ones((n_atoms,), dtype=np.int64)
+            print('set all ref_mask to 1')
+            # fix the ligand res_id which is all 1
+            ligand_atom_array = bioassembly_dict['atom_array'][bioassembly_dict['atom_array'].is_ligand.astype(bool)]
+            res_ids = ligand_atom_array.res_id
+            unique_res_ids = np.unique(res_ids)
+            assert len(unique_res_ids) == 1
+            prot_atom_array = bioassembly_dict['atom_array'][~bioassembly_dict['atom_array'].is_ligand.astype(bool)]
+            max_prot_res_id = prot_atom_array.res_id.max()
+            org_ligand_res_id = unique_res_ids[0]
+            assert org_ligand_res_id == 1
+            new_ligand_res_id = max_prot_res_id + 1
+            bioassembly_dict['atom_array'].res_id[bioassembly_dict['atom_array'].is_ligand.astype(bool)] = new_ligand_res_id
+        # elif 'pbbind_test_v2' in self.name:
+        #     bioassembly_dict['atom_array'].ref_pos = np.zeros_like(bioassembly_dict['atom_array'].ref_pos)
+        #     bioassembly_dict['atom_array'].ref_mask[bioassembly_dict['atom_array'].is_ligand.astype(bool)] = 0
+        #     print('pbbind_test_v2 set all ligand ref_mask to 0')
         
         token_num = len(bioassembly_dict["token_array"])
         
@@ -890,10 +910,10 @@ class BaseSingleDataset(Dataset):
             # Get entity_id of the interested ligand
             sample_indice = self._get_sample_indice(idx=idx)
             if sample_indice.mol_1_type == "ligand":
-                lig_entity_id = str(sample_indice.entity_1_id)
+                lig_entity_id = str(int(sample_indice.entity_1_id))
                 lig_chain_id = str(sample_indice.chain_1_id)
             elif sample_indice.mol_2_type == "ligand":
-                lig_entity_id = str(sample_indice.entity_2_id)
+                lig_entity_id = str(int(float(sample_indice.entity_2_id)))
                 lig_chain_id = str(sample_indice.chain_2_id)
             else:
                 raise ValueError(f"Cannot find ligand from this data point.")

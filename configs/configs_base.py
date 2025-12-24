@@ -178,12 +178,12 @@ model_configs = {
       "churn_step_ratio": 0.33,
       "guidance": 1,
     },
-    # "inference_noise_scheduler": {
-    #     "s_max": 160.0,
-    #     "s_min": 4e-4,
-    #     "rho": 7,
-    #     "sigma_data": 16.0,  # NOTE: in EDM, this is 1.0
-    # },
+    "inference_noise_scheduler": {
+        "s_max": 160.0,
+        "s_min": 4e-4,
+        "rho": 7,
+        "sigma_data": 16.0,  # NOTE: in EDM, this is 1.0
+    },
     "sample_diffusion": {
         "gamma0": 0.8,
         "gamma_min": 1.0,
