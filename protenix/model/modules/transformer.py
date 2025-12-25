@@ -655,9 +655,10 @@ class AtomAttentionEncoder(nn.Module):
         )  # use high precision for ref_pos
         self.use_apo_pos = use_apo_pos
         if use_apo_pos:
-            self.linear_no_bias_ref_pos = LinearNoBias(
-                in_features=6, out_features=self.c_atom, precision=torch.float32
-            )
+            pass
+            # self.linear_no_bias_ref_pos = LinearNoBias(
+            #     in_features=6, out_features=self.c_atom, precision=torch.float32
+            # )
             
             
         self.linear_no_bias_ref_charge = LinearNoBias(
@@ -696,9 +697,14 @@ class AtomAttentionEncoder(nn.Module):
                 precision=torch.float32,
             )
             # Line11
-            self.linear_no_bias_r = LinearNoBias(
-                in_features=3, out_features=self.c_atom, precision=torch.float32
-            )
+            if self.use_apo_pos:
+                self.linear_no_bias_r = LinearNoBias(
+                    in_features=6, out_features=self.c_atom, precision=torch.float32
+                )
+            else:
+                self.linear_no_bias_r = LinearNoBias(
+                    in_features=3, out_features=self.c_atom, precision=torch.float32
+                )
         self.linear_no_bias_cl = LinearNoBias(
             in_features=self.c_atom, out_features=self.c_atompair
         )
@@ -782,7 +788,8 @@ class AtomAttentionEncoder(nn.Module):
         batch_shape = input_feature_dict["ref_pos"].shape[:-2]
         N_atom = input_feature_dict["ref_pos"].shape[-2]
         if self.use_apo_pos:
-            pos_input = torch.cat([input_feature_dict["ref_pos"], input_feature_dict['apo_atom_array']], dim=1)
+            pos_input = input_feature_dict["ref_pos"]
+            # pos_input = torch.cat([input_feature_dict["ref_pos"], input_feature_dict['apo_atom_array']], dim=1)
         else:
             pos_input = input_feature_dict["ref_pos"]
         c_l = self.linear_no_bias_ref_pos(
@@ -897,6 +904,12 @@ class AtomAttentionEncoder(nn.Module):
 
             # Add the noisy positions
             # Different from paper!!
+            if self.use_apo_pos:
+                if input_feature_dict['apo_atom_array'].dim() == 2:
+                    apo_pos_expanded = input_feature_dict['apo_atom_array'].repeat(r_l.size(0), 1, 1)
+                    r_l = torch.cat([r_l, apo_pos_expanded], dim=-1)
+                else:
+                    r_l = torch.cat([r_l, input_feature_dict['apo_atom_array']], dim=-1)
             q_l = c_l + self.linear_no_bias_r(r_l)  # [..., N_sample, N_atom, c_atom]
         else:
             q_l = c_l.clone()

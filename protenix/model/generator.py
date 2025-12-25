@@ -1020,6 +1020,16 @@ def sample_diffusion_training(
         dtype
     )  # [..., N_sample, N_atom, 3]
 
+    # align the 'apo atom array' with the gt
+    if 'apo_atom_array' in input_feature_dict:
+        apo_atom_array = input_feature_dict['apo_atom_array']  # [..., N_atom, 3]
+        # repeat the atom_array N_sample times
+        apo_atom_array = apo_atom_array.unsqueeze(-3).expand(*batch_size_shape, N_sample, apo_atom_array.size(-2), 3)
+        R, t, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
+        x_start = apo_atom_array @ R.transpose(-1, -2) + t.unsqueeze(-2)
+        input_feature_dict['apo_atom_array'] = apo_atom_array
+    
+    
     # Add independent noise to each structure
     # sigma: independent noise-level [..., N_sample]
     sigma = noise_sampler(size=(*batch_size_shape, N_sample), device=device).to(dtype)

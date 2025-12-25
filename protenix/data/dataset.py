@@ -124,6 +124,7 @@ class BaseSingleDataset(Dataset):
         # Read data
         self.indices_list = self.read_indices_list(indices_fpath)
         
+        self.use_apo_pos = kwargs.get("use_apo_pos", False)
         
         # protein encoder: esm
         esm_info = kwargs.get("esm_config", {})
@@ -609,7 +610,7 @@ class BaseSingleDataset(Dataset):
         # pass the orginal tokens 
         # feat['org_token_num'] = token_num # the token number before cropping
         # feat['select_tokens'] = selected_indices # the selected token indices after cropping
-        if 'pdbbind' in self.name:
+        if 'pdbbind' in self.name and self.use_apo_pos:
             feat['apo_atom_array'] = torch.tensor(complex_apo_coords, dtype=feat['ref_pos'].dtype)
             if self.cropping_configs['crop_size'] > -1:
                 feat['apo_atom_array'] = feat['apo_atom_array'][cropped_atom_indices]
@@ -1288,6 +1289,8 @@ def get_datasets(
     
     esm_config = configs.get("esm", None)
     
+    use_apo_pos = configs.model.diffusion_module.use_apo_pos or configs.model.input_embedder.use_apo_pos
+    
     for train_name in data_config.train_sets:
         config_dict = data_config[train_name].to_dict()
         dataset_param = _get_dataset_param(
@@ -1298,6 +1301,7 @@ def get_datasets(
         )
         dataset_param["limits"] = data_config.get("limits", -1)
         dataset_param["esm_config"] = esm_config
+        dataset_param["use_apo_pos"] = use_apo_pos
         train_dataset = BaseSingleDataset(**dataset_param)
         # for debug:
         test_data = train_dataset[0]
