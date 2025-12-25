@@ -107,7 +107,9 @@ class AF3Trainer(object):
                 self.configs,
                 os.path.join(self.configs.base_dir, self.run_name, "config.yaml"),
             )
-        dist.barrier()
+        
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
             
 
@@ -436,6 +438,7 @@ class AF3Trainer(object):
             
             
         else: # eval model
+            # self.symmetric_permutation = None
             batch["pred_dict"], batch["label_dict"], log_dict = self.model(
                 input_feature_dict=batch["input_feature_dict"],
                 label_dict=batch["label_dict"],
@@ -516,8 +519,9 @@ class AF3Trainer(object):
             self.print(f"Testing on {test_name}")
             evaluated_pids = []
             total_batch_num = len(test_dl)
-            if test_name in ['posebusters_0925', "pdbbind_test"]:
+            if test_name in ['posebusters_0925', "pdbbind_test", "pbbind_test_v2"]:
                 ligand_rmsds = []
+                pdb_rmsd_dict = {}
             
             for index, batch in enumerate(tqdm(test_dl)):
                 batch = to_device(batch, self.device)
@@ -544,6 +548,7 @@ class AF3Trainer(object):
                     if 'interested_ligand_mask' in batch['label_dict']:
                         lddt_dict, rmsd_dict = self.get_metrics(batch)
                         ligand_rmsds.extend(rmsd_dict['ligand_rmsds'])
+                        pdb_rmsd_dict[batch['basic']['pdb_id']] = rmsd_dict['ligand_rmsds'].mean()
                     else:
                         lddt_dict = self.get_metrics(batch)
                     
@@ -568,12 +573,20 @@ class AF3Trainer(object):
 
             metrics = simple_metric_wrapper.calc()
             
-            if test_name in ['posebusters_0925', "pdbbind_test"]: # calculate the mean rmsd and rmsd < 2 or 5 A ratio
+            if test_name in ['posebusters_0925', "pdbbind_test", "pbbind_test_v2"]: # calculate the mean rmsd and rmsd < 2 or 5 A ratio
                 ratio_lt_2A = np.mean(np.array(ligand_rmsds) < 2.0)
                 ratio_lt_5A = np.mean(np.array(ligand_rmsds) < 5.0)
                 mean_rmsd = np.mean(ligand_rmsds)
                 self.print(f'ratio 2A:  {ratio_lt_2A}; ratio 5A: {ratio_lt_5A}, mean_rmsd: {mean_rmsd}')
-            
+                # save pdb rmsd dict as txt
+                # sort the dict by rmsd
+                pdb_rmsd_dict = dict(sorted(pdb_rmsd_dict.items(), key=lambda item: item[1]))
+                with open(f'{test_name}_ligand_rmsd.txt', 'w') as f:
+                    for pdb_id, rmsd in pdb_rmsd_dict.items():
+                        f.write(f'{pdb_id}\t{rmsd}\n')
+                
+                
+                
             self.print(f"Step {self.step}, eval {test_name}: {metrics}")
             if self.configs.use_wandb and DIST_WRAPPER.rank == 0:
                 wandb.log(metrics, step=self.step)

@@ -32,6 +32,7 @@ from biotite.structure.molecules import get_molecule_indices
 
 from Bio.PDB import PDBParser
 from rdkit import Chem
+from rdkit.Chem import AllChem
 
 from protenix.data import ccd
 from protenix.data.ccd import get_ccd_ref_info
@@ -990,6 +991,16 @@ class MMCIFParser:
         atoms = mol.GetAtoms()
         
         mask = atom_array.res_name == 'UNL'
+        if len(atoms) != mask.sum():
+            print(f"Warning: ligand atom number not match: {len(atoms)} != {mask.sum()}")
+            # load the org mol2 file
+            org_mol2_path = rdkit_mol_path.replace("_rdkit.sdf", ".mol2")
+            mol2_suppl = Chem.MolFromMol2File(org_mol2_path, removeHs=False, sanitize=True)
+            Chem.Kekulize(mol2_suppl, clearAromaticFlags=False)
+            mol = mol2_suppl
+            mols = [mol]
+            atoms = mol.GetAtoms()
+            
         assert len(atoms) == mask.sum()
         indices = np.where(mask)[0]  # np.where返回元组，[0]取一维索引
 

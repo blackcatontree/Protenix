@@ -122,7 +122,7 @@ def main(error_file: Path | None = None):
         out_sdf  = d / f"{pdbid}_ligand_rdkit.sdf"
         
         
-        # pdbid = '2p3g'
+        # pdbid = '5eg4'
         # d = f'/vepfs-mlp2/mlp-public/shikunfeng/Datas/PDBBIND_atomCorrected/{pdbid}'
         # lig_mol2 = Path(f"{d}/{pdbid}_ligand.mol2")
         # lig_sdf  = Path(f"{d}/{pdbid}_ligand.sdf")
@@ -130,6 +130,7 @@ def main(error_file: Path | None = None):
 
         # already done
         # if out_sdf.exists():
+        #     print(f"{d} already processed, skipping.")
         #     continue
 
         mol = load_ligand_preserve_order(lig_mol2, lig_sdf)

@@ -443,17 +443,17 @@ def load_ligand_preserve_order(lig_mol2, lig_sdf):
     """
     mol = None
 
+    if lig_mol2.exists():
+        # For mol2: disable sanitize first to preserve atom order
+        mol = Chem.MolFromMol2File(str(lig_mol2), sanitize=False, removeHs=False)
+        # if mol is not None:
+        #     Chem.SanitizeMol(mol)
+        return mol
+    
     if lig_sdf.exists():
         # SDF preserves atom order naturally; disable removeHs to avoid reordering
         supplier = Chem.SDMolSupplier(str(lig_sdf), removeHs=False, sanitize=False)
         mol = supplier[0]
-        # if mol is not None:
-        #     Chem.SanitizeMol(mol)
-        return mol
-
-    if lig_mol2.exists():
-        # For mol2: disable sanitize first to preserve atom order
-        mol = Chem.MolFromMol2File(str(lig_mol2), sanitize=False, removeHs=False)
         # if mol is not None:
         #     Chem.SanitizeMol(mol)
         return mol
@@ -574,6 +574,7 @@ def check_folder_valid(folder_path, tag):
 
     for rf in required_files:
         if not os.path.isfile(os.path.join(folder_path, rf)):
+            print(f"Skipping {folder_path}: missing {rf}")
             return False
     return True
 
@@ -594,9 +595,12 @@ def batch_convert_to_mmcif(root_dir, chain_hint="L"):
 
         if not check_folder_valid(folder, tag):
             continue   # 跳过不完整的文件夹
-
+        
+        # folder = Path('/vepfs-mlp2/mlp-public/shikunfeng/Datas/PDBBIND_atomCorrected/6ibz')
         # 构造文件路径
+        # tag = '6ibz'
         ligand_mol2 = folder / f"{tag}_ligand.mol2"
+        ligand_sdf = folder / f"{tag}_ligand.sdf"
         ligand_rdkit = folder / f"{tag}_ligand_rdkit.sdf"
         protein_processed = folder / f"{tag}_protein_processed_fix_processed_sorted.pdb"
         apo_protein = folder / f"{tag}_protein_esmfold_aligned_tr_fix_processed_sorted.pdb"
@@ -605,20 +609,24 @@ def batch_convert_to_mmcif(root_dir, chain_hint="L"):
         output_cif = folder / f"{tag}_merged.cif"
         output_cif2 = folder / f"{tag}_merged_fake.cif"
 
+        # if os.path.isfile(output_cif) and os.path.isfile(output_cif2):
+        #     print(f"Skipping {folder}: output mmCIF already exists.")
+        #     continue
+        
         # 调用你的合并函数（你之前的脚本已经实现）
         try:
-            # merge_protein_and_ligand_to_full_mmcif(
-            #     protein_pdb=str(protein_processed),
-            #     ligand_mol2=str(ligand_mol2),
-            #     lig_sdf=str(ligand_rdkit),
-            #     output_cif=str(output_cif),
-            #     ligand_chain_hint=chain_hint,
-            #     apo_protein_pdb_path=str(apo_protein),# 如需要可设置
-            #     rdkit_mol_path=str(ligand_rdkit)
-            # )
+            merge_protein_and_ligand_to_full_mmcif(
+                protein_pdb=str(protein_processed),
+                ligand_mol2=str(ligand_mol2),
+                lig_sdf=str(ligand_sdf),
+                output_cif=str(output_cif),
+                ligand_chain_hint=chain_hint,
+                apo_protein_pdb_path=str(apo_protein),# 如需要可设置
+                rdkit_mol_path=str(ligand_rdkit)
+            )
             merge_protein_and_ligand_to_full_mmcif(
                 protein_pdb=str(apo_protein),
-                ligand_mol2=str(ligand_mol2),
+                ligand_mol2='abc',  # 占位符，实际不使用
                 lig_sdf=str(ligand_rdkit),
                 output_cif=str(output_cif2),
                 ligand_chain_hint=chain_hint,

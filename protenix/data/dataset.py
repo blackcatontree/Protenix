@@ -489,7 +489,7 @@ class BaseSingleDataset(Dataset):
             # ref_mask all set to 1
             n_atoms = len(bioassembly_dict['atom_array'].ref_mask)
             bioassembly_dict['atom_array'].ref_mask = np.ones((n_atoms,), dtype=np.int64)
-            print('set all ref_mask to 1')
+            # print('set all ref_mask to 1')
             # fix the ligand res_id which is all 1
             ligand_atom_array = bioassembly_dict['atom_array'][bioassembly_dict['atom_array'].is_ligand.astype(bool)]
             res_ids = ligand_atom_array.res_id
