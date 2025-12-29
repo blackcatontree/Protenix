@@ -1328,6 +1328,7 @@ def get_datasets(
         )
         dataset_param["esm_config"] = esm_config
         dataset_param["ref_pos_augment"] = data_config.get("test_ref_pos_augment", True)
+        dataset_param["use_apo_pos"] = use_apo_pos
         test_dataset = BaseSingleDataset(**dataset_param)
         test_datasets[test_name] = test_dataset
     return train_dataset, test_datasets

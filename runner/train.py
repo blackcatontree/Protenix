@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch.distributed as dist
 import datetime
 import hashlib
 import logging
@@ -194,6 +195,19 @@ class AF3Trainer(object):
         
         self.raw_model = Protenix(self.configs).to(self.device)
 
+        self.only_diffusion_module_train = self.configs.model.only_diffusion_module_train
+        if self.only_diffusion_module_train:
+            # 1. 先 freeze 全部参数
+            for p in self.raw_model.parameters():
+                p.requires_grad = False
+
+            # 2. 只解冻 diffusion_module
+            for p in self.raw_model.diffusion_module.parameters():
+                p.requires_grad = True
+
+            # 3. 设置 mode
+            self.raw_model.eval()                      # 全模型 eval
+            self.raw_model.diffusion_module.train()    # diffusion_module 单独 train
             
         self.use_ddp = False
         if DIST_WRAPPER.world_size > 1:
@@ -289,6 +303,7 @@ class AF3Trainer(object):
             skip_load_optimizer: bool = False,
             skip_load_step: bool = False,
             skip_load_scheduler: bool = False,
+            skip_load_diffusion_module: bool = False,
             load_step_for_scheduler: bool = True,
         ):
             if not os.path.exists(checkpoint_path):
@@ -301,14 +316,83 @@ class AF3Trainer(object):
             self.print(f"Sampled key: {sample_key}")
             if sample_key.startswith("module.") and not self.use_ddp:
                 # DDP checkpoint has module. prefix
+                print('replace the model as module......')
                 checkpoint["model"] = {
                     k[len("module.") :]: v for k, v in checkpoint["model"].items()
                 }
 
-            self.model.load_state_dict(
-                state_dict=checkpoint["model"],
-                strict=self.configs.load_strict,
-            )
+            
+            ckpt_state_dict = checkpoint["model"]
+            param_group = set()
+            for k, v in self.model.named_parameters():
+                param_group.add(k.split('.')[0])
+
+            if skip_load_diffusion_module:
+                sample_key = [k for k in ckpt_state_dict.keys()][0]
+                if sample_key.startswith("module."):
+                    diffusion_module_prefix = "module.diffusion_module."
+                else:
+                    diffusion_module_prefix = "diffusion_module."
+                
+                
+                ckpt_state_dict = {
+                    k: v
+                    for k, v in ckpt_state_dict.items()
+                    if not k.startswith(diffusion_module_prefix)
+                }
+            
+
+            if self.configs.model.diffusion_module.use_apo_pos and not skip_load_diffusion_module:
+                sample_key = [k for k in ckpt_state_dict.keys()][0]
+                if sample_key.startswith("module."):
+                    key = "module.diffusion_module.atom_attention_encoder.linear_no_bias_r.weight"
+                else:
+                    print(f'sample_key {sample_key}, and {self.use_ddp}')
+                    key = "diffusion_module.atom_attention_encoder.linear_no_bias_r.weight"
+                # print ckpt_state_dict keys
+                # print(ckpt_state_dict.keys())
+                # import pdb; pdb.set_trace()
+                # dist.barrier()
+                ckpt_w = ckpt_state_dict[key]
+                model_w = self.model.state_dict()[key]
+
+                if ckpt_w.shape != model_w.shape:
+                    assert ckpt_w.dim() == 2
+                    assert ckpt_w.shape[0] == model_w.shape[0]
+                    assert ckpt_w.shape[1] < model_w.shape[1]
+
+                    # 新权重：和模型 shape 一致
+                    new_w = model_w.clone()          # 保留模型原始初始化
+                    new_w.zero_()                    # 你要求后半部分为 0
+                    new_w[:, :ckpt_w.shape[1]] = ckpt_w
+
+                    ckpt_state_dict[key] = new_w
+
+                    print(
+                        f"[INFO] Expand weight {key}: "
+                        f"{tuple(ckpt_w.shape)} -> {tuple(model_w.shape)}"
+                    )
+            
+            missing_keys, unexpected_keys = self.model.load_state_dict(
+                    ckpt_state_dict,
+                    strict=self.configs.load_strict,
+                )
+
+            if skip_load_diffusion_module:
+                print(f"[INFO] Skip loading diffusion_module, "
+                    f"missing keys: {len(missing_keys)}, "
+                    f"unexpected keys: {len(unexpected_keys)}")
+            else:
+                print(f"[INFO] Load full model, "
+                    f"missing keys: {len(missing_keys)}, "
+                    f"unexpected keys: {len(unexpected_keys)}")
+
+            
+            
+            # self.model.load_state_dict(
+            #     state_dict=checkpoint["model"],
+            #     strict=self.configs.load_strict,
+            # )
             if not load_params_only:
                 if not skip_load_optimizer:
                     self.print(f"Loading optimizer state")
@@ -335,6 +419,7 @@ class AF3Trainer(object):
             _load_checkpoint(
                 self.configs.load_ema_checkpoint_path,
                 load_params_only=True,
+                skip_load_diffusion_module=self.configs.skip_load_diffusion_module
             )
             self.ema_wrapper.register()
 
@@ -347,6 +432,7 @@ class AF3Trainer(object):
                 skip_load_scheduler=self.configs.skip_load_scheduler,
                 skip_load_step=self.configs.skip_load_step,
                 load_step_for_scheduler=self.configs.load_step_for_scheduler,
+                skip_load_diffusion_module=self.configs.skip_load_diffusion_module
             )
         
         if self.distill_mode:

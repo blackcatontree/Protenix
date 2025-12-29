@@ -1158,6 +1158,15 @@ class MSELoss(nn.Module):
             coordinate_mask.sum(dim=-1, keepdim=True) + self.eps
         )  # [..., N_sample]
 
+    
+        # for debugging: print per-sample weighted mse before scaling
+        per_sample_weighted_mse_org = per_sample_weighted_mse.clone()
+        weighted_align_mse_loss_org = self.weight_mse * (per_sample_weighted_mse_org).mean(
+            dim=-1
+        )
+        loss_org = loss_reduction(weighted_align_mse_loss_org, method=self.reduction)
+        print(f"DDBM MSELoss before scaling: {loss_org.item()}")
+    
         if per_sample_scale is not None:
             per_sample_weighted_mse = per_sample_weighted_mse * per_sample_scale
 
@@ -1166,6 +1175,9 @@ class MSELoss(nn.Module):
         )  # [...]
 
         loss = loss_reduction(weighted_align_mse_loss, method=self.reduction)
+        
+        # print loss for debugging
+        print(f"DDBM MSELoss: {loss.item()}")
 
         return loss
 

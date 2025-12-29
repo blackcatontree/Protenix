@@ -35,6 +35,7 @@ basic_configs = {
     ],  # params with substring will be finetuned with different learning rate: finetune_optim_configs["lr"]
     "eval_only": False,
     "load_checkpoint_path": "",
+    "skip_load_diffusion_module": False,
     "load_ema_checkpoint_path": "",
     "load_strict": True,
     "load_params_only": True,
@@ -262,6 +263,8 @@ model_configs = {
             "dropout": 0.25,
             "blocks_per_ckpt": GlobalConfigValue("blocks_per_ckpt"),
         },
+        
+        "only_diffusion_module_train": False,
         "diffusion_module": {
             "use_fine_grained_checkpoint": True,
             "sigma_data": GlobalConfigValue("sigma_data"),

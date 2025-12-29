@@ -850,6 +850,8 @@ def sample_diffusion_training_ddbm(
     c_in = c_in.view(c_in.shape + (1,) * (x_noisy.dim() - c_in.dim()))
 
     weights = get_weightings(ddbm_configs, sigmas)
+    
+    # weights = weights / weights.max()
     # Get denoising outputs [..., N_sample, N_atom, 3]
     diffusion_chunk_size = None
     if diffusion_chunk_size is None:
