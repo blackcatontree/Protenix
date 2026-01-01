@@ -128,6 +128,36 @@ class RealUniformSampler:
         ts = torch.rand(batch_size).to(device) *(self.sigma_max - self.sigma_min) + self.sigma_min
         return ts, torch.ones_like(ts)
 
+def append_zero(x):
+    return torch.cat([x, x.new_zeros([1])])
+
+class KarrasSigmaSampler:
+    """
+    Noise schedule from Karras et al. (2022)
+    """
+    def __init__(self, sigma_min, sigma_max, rho=7.0):
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.rho = rho
+
+    def __call__(
+        self,
+        N_step: int = 200,
+        device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        # 对应原来的 n
+        ramp = torch.linspace(0, 1, N_step, device=device, dtype=dtype)
+
+        min_inv_rho = self.sigma_min ** (1.0 / self.rho)
+        max_inv_rho = self.sigma_max ** (1.0 / self.rho)
+
+        sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** self.rho
+        sigmas = append_zero(sigmas)
+
+        # 与 RealUniformSampler 对齐，返回 (values, weights)
+        return sigmas
+
 
 def sample_diffusion(
     denoise_net: Callable,
@@ -251,6 +281,15 @@ def sample_diffusion(
             x_l.append(chunk_x_l)
         x_l = torch.cat(x_l, -3)  # [..., N_sample, N_atom, 3]
     return x_l
+
+def append_dims(x, target_dims):
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
+    dims_to_append = target_dims - x.ndim
+    if dims_to_append < 0:
+        raise ValueError(
+            f"input has {x.ndim} dims but target_dims is {target_dims}, which is less"
+        )
+    return x[(...,) + (None,) * dims_to_append]
 
 def to_d(x, sigma, denoised, x_T, sigma_max,   w=1, stochastic=False):
     """Converts a denoiser output to a Karras ODE derivative."""

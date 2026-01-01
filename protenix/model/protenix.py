@@ -25,6 +25,7 @@ from protenix.model.generator import (
     InferenceNoiseScheduler,
     TrainingNoiseSampler,
     RealUniformSampler,
+    KarrasSigmaSampler,
     sample_diffusion,
     sample_diffusion_ddbm,
     sample_diffusion_training,
@@ -83,13 +84,18 @@ class Protenix(nn.Module):
         if self.ddbm:
             self.train_noise_sampler = RealUniformSampler(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
             
-            inference_noise_schedule = {}
-            inference_noise_schedule['s_min'] = configs.ddbm_configs['sigma_min']
-            inference_noise_schedule['s_max'] = configs.ddbm_configs['sigma_max']
-            inference_noise_schedule['sigma_data'] = configs.ddbm_configs['sigma_data']
-            inference_noise_schedule['rho'] = configs.ddbm_configs['rho']
-            self.inference_noise_scheduler = InferenceNoiseScheduler(
-                **inference_noise_schedule
+            # inference_noise_schedule = {}
+            # inference_noise_schedule['s_min'] = configs.ddbm_configs['sigma_min']
+            # inference_noise_schedule['s_max'] = configs.ddbm_configs['sigma_max'] - 1e-4
+            # inference_noise_schedule['sigma_data'] = configs.ddbm_configs['sigma_data']
+            # inference_noise_schedule['rho'] = configs.ddbm_configs['rho']
+            # self.inference_noise_scheduler = InferenceNoiseScheduler(
+            #     **inference_noise_schedule
+            # )
+            self.inference_noise_scheduler = KarrasSigmaSampler(
+                sigma_max=configs.ddbm_configs['sigma_max'] - 1e-4,
+                sigma_min=configs.ddbm_configs['sigma_min'],
+                rho=configs.ddbm_configs['rho'],
             )
             
             # configs.inference_noise_scheduler.sigma_data = 1.0
