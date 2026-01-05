@@ -685,8 +685,8 @@ def kabsch_torch_batched(P, Q):
     # RMSD
     rmsd = torch.sqrt(torch.sum(torch.square(torch.matmul(p, R.transpose(1, 2)) - q), dim=(1, 2)) / P.shape[1])
 
-    return R, t, rmsd
-
+    # return R, t, rmsd
+    return torch.matmul(p, R.transpose(1, 2)), q, rmsd
 
 def get_bridge_scalings(ddbm_configs, sigma):
     if ddbm_configs["pred_mode"] == 've':
@@ -840,8 +840,10 @@ def sample_diffusion_training_ddbm(
     # x_gt_augment = apo_atom_array @ R_gt.T + t_gt
     
     
-    R, t, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
-    x_start = apo_atom_array @ R.transpose(-1, -2) + t.unsqueeze(-2)
+    # R, t, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
+    # x_start = apo_atom_array @ R.transpose(-1, -2) + t.unsqueeze(-2)
+    x_start, x_gt_augment, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
+    input_feature_dict['apo_atom_array'] = x_start
     
     new_rmsd = torch.sqrt(torch.sum((x_start - x_gt_augment)**2, dim=(-1, -2)) / x_gt_augment.size(-2))
     # TODO test the kabsch_torch_batched function
@@ -889,6 +891,8 @@ def sample_diffusion_training_ddbm(
     c_in = c_in.view(c_in.shape + (1,) * (x_noisy.dim() - c_in.dim()))
 
     weights = get_weightings(ddbm_configs, sigmas)
+    if weights.max() > 10000:
+        print(f'warning, weighted max is {weights.max().item()}')
     
     # weights = weights / weights.max()
     # Get denoising outputs [..., N_sample, N_atom, 3]
@@ -1066,9 +1070,10 @@ def sample_diffusion_training(
         apo_atom_array = input_feature_dict['apo_atom_array']  # [..., N_atom, 3]
         # repeat the atom_array N_sample times
         apo_atom_array = apo_atom_array.unsqueeze(-3).expand(*batch_size_shape, N_sample, apo_atom_array.size(-2), 3)
-        R, t, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
-        x_start = apo_atom_array @ R.transpose(-1, -2) + t.unsqueeze(-2)
-        input_feature_dict['apo_atom_array'] = apo_atom_array
+        # R, t, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
+        # x_start = apo_atom_array @ R.transpose(-1, -2) + t.unsqueeze(-2)
+        x_start, x_gt_augment, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
+        input_feature_dict['apo_atom_array'] = x_start
     
     
     # Add independent noise to each structure

@@ -1168,6 +1168,8 @@ class MSELoss(nn.Module):
         print(f"DDBM MSELoss before scaling: {loss_org.item()}")
     
         if per_sample_scale is not None:
+            if per_sample_scale.max() > 10000:
+                print(f'warning: per_sample_scale has large values: max={per_sample_scale.max().item()}')
             per_sample_weighted_mse = per_sample_weighted_mse * per_sample_scale
 
         weighted_align_mse_loss = self.weight_mse * (per_sample_weighted_mse).mean(
@@ -1175,6 +1177,9 @@ class MSELoss(nn.Module):
         )  # [...]
 
         loss = loss_reduction(weighted_align_mse_loss, method=self.reduction)
+        
+        if loss.item() > loss_org.item() * 10:
+            print("Warning: Loss increased significantly after scaling!")
         
         # print loss for debugging
         print(f"DDBM MSELoss: {loss.item()}")
@@ -1564,7 +1569,9 @@ class ProtenixLoss(nn.Module):
             ):
                 loss = 0.0 * loss
             else:
+                print(f'loss_name: {loss_name}, loss: {loss.item()}, weight: {weight}')
                 all_metrics[loss_name] = loss.detach().clone()
+                print(f'weighted_{loss_name}: {weight * loss.item()}')
                 all_metrics[f"weighted_{loss_name}"] = weight * loss.detach().clone()
 
             cum_loss = cum_loss + weight * loss
