@@ -127,6 +127,55 @@ class RealUniformSampler:
     def sample(self, batch_size, device):
         ts = torch.rand(batch_size).to(device) *(self.sigma_max - self.sigma_min) + self.sigma_min
         return ts, torch.ones_like(ts)
+        # ts = torch.rand(batch_size).to(device) *(self.sigma_max**2 - self.sigma_min**2) + self.sigma_min**2
+        # return torch.sqrt(ts), torch.ones_like(ts)
+
+class RealUniformSamplerSquare:
+    def __init__(self, sigma_max=80, sigma_min=0.002):
+        self.sigma_max = sigma_max
+        self.sigma_min = sigma_min
+
+    def sample(self, batch_size, device):
+        ts = torch.rand(batch_size).to(device) *(self.sigma_max**2 - self.sigma_min**2) + self.sigma_min**2
+        return ts, torch.ones_like(ts)
+
+class RealUnifromSamplerLognorm: 
+    def __init__( self, sigma_max=80, sigma_min=0.002, lognorm_mean=0.0, lognorm_std=1.0): 
+        self.sigma_max = sigma_max 
+        self.sigma_min = sigma_min 
+        self.lognorm_mean = lognorm_mean
+        self.lognorm_std = lognorm_std
+    
+    def sample(self, batch_size, device): # LogNormal sampling 
+        ts = torch.distributions.LogisticNormal( self.lognorm_mean, self.lognorm_std ).sample((batch_size,)).to(device) # 若你仍然希望限制在 [sigma_min, sigma_max] 
+        ts = ts*(self.sigma_max - self.sigma_min) + self.sigma_min 
+        return ts, torch.ones_like(ts)
+
+class RealUnifromSamplerLognorm:
+    def __init__(
+        self,
+        sigma_max=80,
+        sigma_min=0.002,
+        lognorm_mean=0.0,
+        lognorm_std=1.0,
+    ):
+        self.sigma_max = sigma_max
+        self.sigma_min = sigma_min
+        self.lognorm_mean = lognorm_mean
+        self.lognorm_std = lognorm_std
+
+    def sample(self, batch_size, device):
+        # LogNormal sampling
+        ts = torch.distributions.LogNormal(
+            self.lognorm_mean,
+            self.lognorm_std
+        ).sample((batch_size,)).to(device)
+
+        # 若你仍然希望限制在 [sigma_min, sigma_max]
+        ts = ts*(self.sigma_max - self.sigma_min) + self.sigma_min
+
+        return ts, torch.ones_like(ts)
+
 
 def append_zero(x):
     return torch.cat([x, x.new_zeros([1])])
