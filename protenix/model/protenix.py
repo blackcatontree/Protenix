@@ -25,6 +25,8 @@ from protenix.model.generator import (
     InferenceNoiseScheduler,
     TrainingNoiseSampler,
     RealUniformSampler,
+    RealUniformSamplerSquare,
+    RealUnifromSamplerLogisticnorm,
     KarrasSigmaSampler,
     sample_diffusion,
     sample_diffusion_ddbm,
@@ -82,7 +84,15 @@ class Protenix(nn.Module):
         # Diffusion scheduler
         self.ddbm = configs.ddbm
         if self.ddbm:
-            self.train_noise_sampler = RealUniformSampler(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
+            
+            train_sampler_type = configs.ddbm_configs.get('train_sampler', 'RealUniformSampler')
+            if train_sampler_type == 'RealUniformSampler':
+                self.train_noise_sampler = RealUniformSampler(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
+            elif train_sampler_type == 'RealUniformSamplerSquare':
+                self.train_noise_sampler = RealUniformSamplerSquare(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
+            else:
+                self.train_noise_sampler = RealUnifromSamplerLogisticnorm(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
+            
             
             # inference_noise_schedule = {}
             # inference_noise_schedule['s_min'] = configs.ddbm_configs['sigma_min']

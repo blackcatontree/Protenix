@@ -140,7 +140,7 @@ class RealUniformSamplerSquare:
         return ts, torch.ones_like(ts)
 
 class RealUnifromSamplerLognorm: 
-    def __init__( self, sigma_max=80, sigma_min=0.002, lognorm_mean=0.0, lognorm_std=1.0): 
+    def __init__(self, sigma_max=80, sigma_min=0.002, lognorm_mean=0.0, lognorm_std=1.0): 
         self.sigma_max = sigma_max 
         self.sigma_min = sigma_min 
         self.lognorm_mean = lognorm_mean
@@ -151,7 +151,7 @@ class RealUnifromSamplerLognorm:
         ts = ts*(self.sigma_max - self.sigma_min) + self.sigma_min 
         return ts, torch.ones_like(ts)
 
-class RealUnifromSamplerLognorm:
+class RealUnifromSamplerLogisticnorm:
     def __init__(
         self,
         sigma_max=80,

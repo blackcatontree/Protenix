@@ -163,7 +163,10 @@ model_configs = {
     #   "sigma_data": 0.5,
     #   "cov_xy": 0,
     #   "c": 1,
-    #   "weight_schedule":"bridge_karras",  
+    #   "weight_schedule":"bridge_karras",
+    
+      "train_sampler": "RealUniformSampler", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
+      
       "pred_mode": "vp",
       "sigma_max": 1.0,
       "sigma_min":0.0001,
