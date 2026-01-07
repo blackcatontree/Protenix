@@ -166,6 +166,10 @@ model_configs = {
     #   "weight_schedule":"bridge_karras",
     
       "train_sampler": "RealUniformSampler", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
+      "infer_sampler": "ddbm", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
+    #   "infer_sampler": "ddim", # ddim, ddbm
+      
+      
       
       "pred_mode": "vp",
       "sigma_max": 1.0,

@@ -19,6 +19,36 @@ import torch
 from protenix.model.utils import centre_random_augmentation
 import numpy as np
 
+class PreCond:
+    def __init__(self, ns):
+        raise NotImplementedError
+
+    def _get_scalings_and_weightings(self, t):
+        raise NotImplementedError
+
+    def get_scalings_and_weightings(self, t, ndim):
+        c_skip, c_in, c_out, c_noise, weightings = self._get_scalings_and_weightings(t)
+        c_skip, c_in, c_out, weightings = [append_dims(item, ndim) for item in [c_skip, c_in, c_out, weightings]]
+        return c_skip, c_in, c_out, c_noise, weightings
+
+
+class DDBMPreCond(PreCond):
+    def __init__(self, ns, sigma_data, cov_xy):
+        self.ns, self.sigma_data, self.cov_xy = ns, sigma_data, cov_xy
+        self.sigma_data_end = sigma_data
+
+    def _get_scalings_and_weightings(self, t):
+        a_t, b_t, c_t = self.ns.get_abc(t)
+        A = a_t**2 * self.sigma_data_end**2 + b_t**2 * self.sigma_data**2 + 2 * a_t * b_t * self.cov_xy + c_t**2
+        c_in = 1 / (A) ** 0.5
+        c_skip = (b_t * self.sigma_data**2 + a_t * self.cov_xy) / A
+        c_out = (
+            a_t**2 * (self.sigma_data_end**2 * self.sigma_data**2 - self.cov_xy**2) + self.sigma_data**2 * c_t**2
+        ) ** 0.5 * c_in
+        c_noise = 1000 * 0.25 * torch.log(t + 1e-44)
+        weightings = 1 / c_out**2
+        return c_skip, c_in, c_out, c_noise, weightings
+
 class TrainingNoiseSampler:
     """
     Sample the noise-level of of training samples
@@ -208,6 +238,165 @@ class KarrasSigmaSampler:
         return sigmas
 
 
+
+class UniformSigmaSampler:
+    """
+    Uniform noise schedule sampler.
+    
+    Generates linearly spaced sigmas from t_max to t_min.
+    Returns (sigmas, weights) similar to other samplers.
+    """
+    def __init__(self, t_min: float = 0.0001, t_max: float = 1.0 - 1e-3):
+        self.t_min = t_min
+        self.t_max = t_max
+
+    def __call__(
+        self,
+        N_step: int = 200,
+        device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype = torch.float32
+    ) -> torch.Tensor:
+        """
+        Args:
+            N_step: number of steps (like 'n' in get_sigmas_uniform)
+            device: torch device
+            dtype: torch dtype
+
+        Returns:
+            sigmas: Tensor of shape (N_step+1,), last value appended 0
+        """
+        sigmas = torch.linspace(self.t_max, self.t_min, N_step + 1, device=device, dtype=dtype)
+        return sigmas
+
+
+
+
+class NoiseSchedule:
+    def __init__(self):
+        raise NotImplementedError
+
+    def get_f_g2(self, t):
+        raise NotImplementedError
+
+    def get_alpha_rho(self, t):
+        raise NotImplementedError
+
+    def get_abc(self, t):
+        alpha_t, alpha_bar_t, rho_t, rho_bar_t = self.get_alpha_rho(t)
+        a_t, b_t, c_t = (
+            (alpha_bar_t * rho_t**2) / self.rho_T**2,
+            (alpha_t * rho_bar_t**2) / self.rho_T**2,
+            (alpha_t * rho_bar_t * rho_t) / self.rho_T,
+        )
+        a_t = a_t.to(t.dtype)
+        b_t = b_t.to(t.dtype)
+        c_t = c_t.to(t.dtype)
+        return a_t, b_t, c_t
+
+
+class VPNoiseSchedule(NoiseSchedule):
+    def __init__(self, beta_d=2, beta_min=0.1):
+        self.beta_d, self.beta_min = beta_d, beta_min
+        self.alpha_fn = lambda t: np.e ** (-0.5 * beta_min * t - 0.25 * beta_d * t**2)
+        self.alpha_T = self.alpha_fn(1)
+        self.rho_fn = lambda t: (np.e ** (beta_min * t + 0.5 * beta_d * t**2) - 1).sqrt()
+        self.rho_T = self.rho_fn(torch.DoubleTensor([1])).item()
+
+        self.f_fn = lambda t: (-0.5 * beta_min - 0.5 * beta_d * t)
+        self.g2_fn = lambda t: (beta_min + beta_d * t)
+
+    def get_f_g2(self, t):
+        t = t.to(torch.float64)
+        f, g2 = self.f_fn(t), self.g2_fn(t)
+        return f, g2
+
+    def get_alpha_rho(self, t):
+        t = t.to(torch.float64)
+        alpha_t = self.alpha_fn(t)
+        alpha_bar_t = alpha_t / self.alpha_T
+        rho_t = self.rho_fn(t)
+        rho_bar_t = (self.rho_T**2 - rho_t**2).sqrt()
+        
+        alpha_t = alpha_t.to(torch.float32)
+        alpha_bar_t = alpha_bar_t.to(torch.float32)
+        rho_t = rho_t.to(torch.float32)
+        rho_bar_t = rho_bar_t.to(torch.float32)
+        return alpha_t, alpha_bar_t, rho_t, rho_bar_t
+
+
+class VENoiseSchedule(NoiseSchedule):
+    def __init__(self, sigma_max=80.0):
+        self.sigma_max = sigma_max
+        self.alpha_fn = lambda t: torch.ones_like(t)
+        self.alpha_T = 1
+        self.rho_fn = lambda t: t
+        self.rho_T = sigma_max
+
+        self.f_fn = lambda t: torch.zeros_like(t)
+        self.g2_fn = lambda t: 2 * t
+
+    def get_f_g2(self, t):
+        t = t.to(torch.float64)
+        f, g2 = self.f_fn(t), self.g2_fn(t)
+        return f, g2
+
+    def get_alpha_rho(self, t):
+        t = t.to(torch.float64)
+        alpha_t = self.alpha_fn(t)
+        alpha_bar_t = alpha_t / self.alpha_T
+        rho_t = self.rho_fn(t)
+        rho_bar_t = (self.rho_T**2 - rho_t**2).sqrt()
+        
+        
+        alpha_t = alpha_t.to(torch.float32)
+        alpha_bar_t = alpha_bar_t.to(torch.float32)
+        rho_t = rho_t.to(torch.float32)
+        rho_bar_t = rho_bar_t.to(torch.float32)
+        return alpha_t, alpha_bar_t, rho_t, rho_bar_t
+
+
+class BatchedSeedGenerator:
+
+    def __init__(self, seeds=None):
+        self.num_samples = len(seeds)
+        if torch.cuda.is_available():
+            self.rng = [torch.Generator(torch.device('cuda')) for _ in range(self.num_samples)]
+        else:
+            self.rng = [torch.Generator() for _ in range(self.num_samples)]
+        [rng.manual_seed(int(seeds[i])) for i, rng in enumerate(self.rng)]
+
+    def randn(self, size, dtype=torch.float, device="cpu"):
+        assert size[0] == self.num_samples
+        return torch.cat(
+            [
+                torch.randn(1, *size[1:], generator=self.rng[i], dtype=dtype, device=device)
+                for i in range(self.num_samples)
+            ],
+            dim=0,
+        )
+
+    def randint(self, low, high, size, dtype=torch.long, device="cpu"):
+        assert size[0] == self.num_samples
+        return torch.cat(
+            [
+                torch.randint(
+                    low,
+                    high,
+                    generator=self.rng[i],
+                    size=(1, *size[1:]),
+                    dtype=dtype,
+                    device=device,
+                )
+                for i in range(self.num_samples)
+            ],
+            dim=0,
+        )
+
+    def randn_like(self, tensor):
+        size, dtype, device = tensor.size(), tensor.dtype, tensor.device
+        return self.randn(size, dtype=dtype, device=device)
+
+
 def sample_diffusion(
     denoise_net: Callable,
     input_feature_dict: dict[str, Any],
@@ -374,6 +563,11 @@ def get_d_vp(x, denoised, x_T, std_t,logsnr_t, logsnr_T, logs_t, logs_T, s_t_der
     else:
         return d
 
+def bridge_sample_ddim(x0, xT, t, noise, noise_schedule):
+    a_t, b_t, c_t = [append_dims(item, x0.ndim) for item in noise_schedule.get_abc(t)]
+    samples = a_t * xT + b_t * x0 + c_t * noise
+    return samples
+
 def sample_diffusion_ddbm(
     denoise_net: Callable,
     input_feature_dict: dict[str, Any],
@@ -424,6 +618,117 @@ def sample_diffusion_ddbm(
     device = s_inputs.device
     dtype = s_inputs.dtype
 
+    
+    
+    
+    def sample_dbim(
+        denoiser,
+        x,
+        ts,
+        noise_schedule,
+        t_max,
+        eta=1.0,
+        mask=None,
+        seed=42,
+        **kwargs,
+    ):
+        x_T = x
+        path = []
+        pred_x0 = []
+
+        ones = x.new_ones([x.shape[0]])
+        indices = range(len(ts) - 1)
+
+        nfe = 0
+        # x0_hat = denoiser(x, t_max * ones)
+        
+        batch_sigmas = t_max * ones
+        precond = DDBMPreCond(noise_schedule, ddbm_configs["sigma_data"], ddbm_configs["cov_xy"])
+        c_skip, c_in, c_out, c_noise , _ = precond.get_scalings_and_weightings(batch_sigmas, x.ndim)
+        # convert c_skip, c_in, c_out to dtype of x
+        # c_skip = c_skip.to(x.dtype)
+        # c_in = c_in.to(x.dtype)
+        # c_out = c_out.to(x.dtype)
+        x0_hat = denoiser(
+                    x_noisy=x,
+                    t_hat_noise_level=batch_sigmas, # not matter when provide the c_in, c_skip and c_out
+                    input_feature_dict=input_feature_dict,
+                    s_inputs=s_inputs,
+                    s_trunk=s_trunk,
+                    z_trunk=z_trunk,
+                    chunk_size=attn_chunk_size,
+                    inplace_safe=inplace_safe,
+                    c_in=c_in,
+                    c_skip=c_skip,
+                    c_out=c_out,
+                )
+                
+                # denoised = denoiser(x, sigmas[i] * s_in, x_T)
+                # denoised = denoiser(x, sigmas[i] * s_in, x_T)
+        
+        # repeat seed for each sample in the batch
+        batch_num = x.shape[0]
+        seed = [seed for _ in range(batch_num)]
+        generator = BatchedSeedGenerator(seed)
+        noise = generator.randn_like(x0_hat)
+        first_noise = noise
+        if mask is not None:
+            x0_hat = x0_hat * mask + x_T * (1 - mask)
+        x = bridge_sample_ddim(x0_hat, x_T, ts[0] * ones, noise, noise_schedule)
+        path.append(x.detach().cpu())
+        pred_x0.append(x0_hat.detach().cpu())
+        nfe += 1
+
+        for _, i in enumerate(indices):
+            s = ts[i]
+            t = ts[i + 1]
+
+            batch_sigmas = s * ones
+            c_skip, c_in, c_out, c_noise , _ = precond.get_scalings_and_weightings(batch_sigmas, x.ndim)
+            # convert c_skip, c_in, c_out to dtype of x
+            # c_skip = c_skip.to(x.dtype)
+            # c_in = c_in.to(x.dtype)
+            # c_out = c_out.to(x.dtype)
+            x0_hat = denoiser(
+                        x_noisy=x,
+                        t_hat_noise_level=batch_sigmas, # not matter when provide the c_in, c_skip and c_out
+                        input_feature_dict=input_feature_dict,
+                        s_inputs=s_inputs,
+                        s_trunk=s_trunk,
+                        z_trunk=z_trunk,
+                        chunk_size=attn_chunk_size,
+                        inplace_safe=inplace_safe,
+                        c_in=c_in,
+                        c_skip=c_skip,
+                        c_out=c_out,
+                    )
+            # x0_hat = denoiser(x, s * ones)
+            if mask is not None:
+                x0_hat = x0_hat * mask + x_T * (1 - mask)
+
+            a_s, b_s, c_s = [append_dims(item, x0_hat.ndim) for item in noise_schedule.get_abc(s * ones)]
+            a_t, b_t, c_t = [append_dims(item, x0_hat.ndim) for item in noise_schedule.get_abc(t * ones)]
+
+            _, _, rho_s, _ = [append_dims(item, x0_hat.ndim) for item in noise_schedule.get_alpha_rho(s * ones)]
+            alpha_t, _, rho_t, _ = [
+                append_dims(item, x0_hat.ndim) for item in noise_schedule.get_alpha_rho(t * ones)
+            ]
+
+            omega_st = eta * (alpha_t * rho_t) * (1 - rho_t**2 / rho_s**2).sqrt()
+            tmp_var = (c_t**2 - omega_st**2).sqrt() / c_s
+            coeff_xs = tmp_var
+            coeff_x0_hat = b_t - tmp_var * b_s
+            coeff_xT = a_t - tmp_var * a_s
+
+            noise = generator.randn_like(x0_hat)
+
+            x = coeff_x0_hat * x0_hat + coeff_xT * x_T + coeff_xs * x + (1 if i != len(ts) - 2 else 0) * omega_st * noise
+
+            path.append(x.detach().cpu())
+            pred_x0.append(x0_hat.detach().cpu())
+            nfe += 1
+
+        return x, path, nfe, pred_x0, ts, first_noise
 
 
     def sample_heun(
@@ -652,18 +957,35 @@ def sample_diffusion_ddbm(
     # repeat the apo coordinates N_sample times
     x_T = input_feature_dict['apo_atom_array'].unsqueeze(0).repeat(N_sample, 1, 1)
     
-    
-    x_l, path, nfe = sample_heun(denoise_net,
-            x_T,
-            noise_schedule,
-            pred_mode=ddbm_configs["pred_mode"],
-            progress=False,
-            sigma_max=ddbm_configs["sigma_max"],
-            beta_d=ddbm_configs["beta_d"],
-            beta_min=ddbm_configs["beta_min"],
-            churn_step_ratio=ddbm_configs.get("churn_step_ratio", 0.33),
-            guidance=ddbm_configs.get("guidance", 1),
-            )
+    test_sampler = ddbm_configs.get("infer_sampler", "ddbm")
+    if test_sampler == 'ddim':
+        if ddbm_configs.get("pred_mode", "vp") == "ve":
+            noise_schedule_obj = VENoiseSchedule(sigma_max=ddbm_configs["sigma_max"])
+        elif ddbm_configs.get("pred_mode", "vp").startswith("vp"):
+            noise_schedule_obj = VPNoiseSchedule(beta_d=ddbm_configs["beta_d"], beta_min=ddbm_configs["beta_min"])
+        else:
+            raise NotImplementedError(f"pred_mode {ddbm_configs.get('pred_mode', 'vp')} not implemented for ddim sampler")
+        ts = noise_schedule
+        x_l, path, nfe, pred_x0, ts, first_noise = sample_dbim(denoise_net,
+                x_T,
+                ts,
+                noise_schedule_obj,
+                t_max=ddbm_configs["sigma_max"],
+                eta=ddbm_configs.get("eta", 1.0),
+                seed=ddbm_configs.get("seed", 42),
+                )
+    else:
+        x_l, path, nfe = sample_heun(denoise_net,
+                x_T,
+                noise_schedule,
+                pred_mode=ddbm_configs["pred_mode"],
+                progress=False,
+                sigma_max=ddbm_configs["sigma_max"],
+                beta_d=ddbm_configs["beta_d"],
+                beta_min=ddbm_configs["beta_min"],
+                churn_step_ratio=ddbm_configs.get("churn_step_ratio", 0.33),
+                guidance=ddbm_configs.get("guidance", 1),
+                )
     # if diffusion_chunk_size is None:
         # x_l = _chunk_sample_diffusion(N_sample, inplace_safe=inplace_safe)
     # else:
