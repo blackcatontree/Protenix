@@ -28,6 +28,7 @@ from protenix.model.generator import (
     RealUniformSamplerSquare,
     RealUnifromSamplerLogisticnorm,
     KarrasSigmaSampler,
+    UniformSigmaSampler,
     sample_diffusion,
     sample_diffusion_ddbm,
     sample_diffusion_training,
@@ -102,11 +103,15 @@ class Protenix(nn.Module):
             # self.inference_noise_scheduler = InferenceNoiseScheduler(
             #     **inference_noise_schedule
             # )
-            self.inference_noise_scheduler = KarrasSigmaSampler(
-                sigma_max=configs.ddbm_configs['sigma_max'] - 1e-4,
-                sigma_min=configs.ddbm_configs['sigma_min'],
-                rho=configs.ddbm_configs['rho'],
-            )
+            test_sampler = configs.ddbm_configs.get("infer_sampler", "ddbm")
+            if test_sampler == 'ddbm':
+                self.inference_noise_scheduler = KarrasSigmaSampler(
+                    sigma_max=configs.ddbm_configs['sigma_max'] - 1e-4,
+                    sigma_min=configs.ddbm_configs['sigma_min'],
+                    rho=configs.ddbm_configs['rho'],
+                )
+            else:
+                self.inference_noise_scheduler = UniformSigmaSampler(t_min=configs.ddbm_configs['sigma_min'], t_max=configs.ddbm_configs['sigma_max'] - 1e-3, N_step=configs.sample_diffusion['N_step'])
             
             # configs.inference_noise_scheduler.sigma_data = 1.0
             # configs.inference_noise_scheduler.s_min = 0.0001
