@@ -563,7 +563,7 @@ def get_d_vp(x, denoised, x_T, std_t,logsnr_t, logsnr_T, logs_t, logs_T, s_t_der
     else:
         return d
 
-def bridge_sample_ddim(x0, xT, t, noise, noise_schedule):
+def bridge_sample_dbim(x0, xT, t, noise, noise_schedule):
     a_t, b_t, c_t = [append_dims(item, x0.ndim) for item in noise_schedule.get_abc(t)]
     samples = a_t * xT + b_t * x0 + c_t * noise
     return samples
@@ -674,7 +674,7 @@ def sample_diffusion_ddbm(
         first_noise = noise
         if mask is not None:
             x0_hat = x0_hat * mask + x_T * (1 - mask)
-        x = bridge_sample_ddim(x0_hat, x_T, ts[0] * ones, noise, noise_schedule)
+        x = bridge_sample_dbim(x0_hat, x_T, ts[0] * ones, noise, noise_schedule)
         path.append(x.detach().cpu())
         pred_x0.append(x0_hat.detach().cpu())
         nfe += 1
@@ -958,13 +958,13 @@ def sample_diffusion_ddbm(
     x_T = input_feature_dict['apo_atom_array'].unsqueeze(0).repeat(N_sample, 1, 1)
     
     test_sampler = ddbm_configs.get("infer_sampler", "ddbm")
-    if test_sampler == 'ddim':
+    if test_sampler == 'dbim':
         if ddbm_configs.get("pred_mode", "vp") == "ve":
             noise_schedule_obj = VENoiseSchedule(sigma_max=ddbm_configs["sigma_max"])
         elif ddbm_configs.get("pred_mode", "vp").startswith("vp"):
             noise_schedule_obj = VPNoiseSchedule(beta_d=ddbm_configs["beta_d"], beta_min=ddbm_configs["beta_min"])
         else:
-            raise NotImplementedError(f"pred_mode {ddbm_configs.get('pred_mode', 'vp')} not implemented for ddim sampler")
+            raise NotImplementedError(f"pred_mode {ddbm_configs.get('pred_mode', 'vp')} not implemented for dbim sampler")
         ts = noise_schedule
         x_l, path, nfe, pred_x0, ts, first_noise = sample_dbim(denoise_net,
                 x_T,

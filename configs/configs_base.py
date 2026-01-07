@@ -167,7 +167,7 @@ model_configs = {
     
       "train_sampler": "RealUniformSampler", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
       "infer_sampler": "ddbm", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
-    #   "infer_sampler": "ddim", # ddim, ddbm
+    #   "infer_sampler": "dbim", # dbim, ddbm
       
       
       

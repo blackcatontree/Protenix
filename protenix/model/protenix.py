@@ -111,7 +111,7 @@ class Protenix(nn.Module):
                     rho=configs.ddbm_configs['rho'],
                 )
             else:
-                self.inference_noise_scheduler = UniformSigmaSampler(t_min=configs.ddbm_configs['sigma_min'], t_max=configs.ddbm_configs['sigma_max'] - 1e-3, N_step=configs.sample_diffusion['N_step'])
+                self.inference_noise_scheduler = UniformSigmaSampler(t_min=configs.ddbm_configs['sigma_min'], t_max=configs.ddbm_configs['sigma_max'] - 1e-3)
             
             # configs.inference_noise_scheduler.sigma_data = 1.0
             # configs.inference_noise_scheduler.s_min = 0.0001
