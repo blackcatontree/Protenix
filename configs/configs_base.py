@@ -166,7 +166,7 @@ model_configs = {
     #   "weight_schedule":"bridge_karras",
     
       "train_sampler": "RealUniformSampler", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
-      "infer_sampler": "ddbm", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
+      "infer_sampler": "dbim", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
     #   "infer_sampler": "dbim", # dbim, ddbm
       
       

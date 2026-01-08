@@ -918,7 +918,7 @@ class Protenix(nn.Module):
                     #     atom_elements=ligand_elements,
                     # )  # assume the unimol model returns a dict
                 # get the unimol embeddings
-                unimol_embeddings = unimol_output['embeddings']  # [N_ligand_atoms, unimol_dim]
+                unimol_embeddings = out['embeddings']  # [N_ligand_atoms, unimol_dim]
                 input_feature_dict['unimol_embeddings'] = unimol_embeddings
             
         
