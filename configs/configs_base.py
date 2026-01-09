@@ -169,7 +169,8 @@ model_configs = {
       "infer_sampler": "dbim", #RealUniformSampler, RealUniformSamplerSquare, RealUnifromSamplerLognorm
     #   "infer_sampler": "dbim", # dbim, ddbm
       
-      
+      "lognorm_std": 1.0,
+      "lognorm_mean": 0.0,
       
       "pred_mode": "vp",
       "sigma_max": 1.0,
@@ -187,6 +188,7 @@ model_configs = {
       "rho":7,
       "churn_step_ratio": 0.33,
       "guidance": 1,
+      "eta": 1.0,
     },
     "inference_noise_scheduler": {
         "s_max": 160.0,

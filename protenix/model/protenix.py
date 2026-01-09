@@ -92,7 +92,7 @@ class Protenix(nn.Module):
             elif train_sampler_type == 'RealUniformSamplerSquare':
                 self.train_noise_sampler = RealUniformSamplerSquare(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
             else:
-                self.train_noise_sampler = RealUnifromSamplerLogisticnorm(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'])
+                self.train_noise_sampler = RealUnifromSamplerLogisticnorm(sigma_max=configs.ddbm_configs['sigma_max'], sigma_min=configs.ddbm_configs['sigma_min'], lognorm_std=configs.ddbm_configs.get('lognorm_std', 1.0), lognorm_mean=configs.ddbm_configs.get('lognorm_mean', 0.0))
             
             
             # inference_noise_schedule = {}
