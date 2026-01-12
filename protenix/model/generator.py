@@ -1062,6 +1062,86 @@ def kabsch_torch_batched(P, Q):
     # return R, t, rmsd
     return torch.matmul(p, R.transpose(1, 2)), q, rmsd
 
+def kabsch_torch_batched_protein(P, Q, ligand_mask):
+    """
+    Batched Kabsch alignment using ONLY protein atoms (mask=0),
+    but applies the rotation to ALL atoms (including ligand).
+
+    Args:
+        P: [B, N, 3] source coordinates (apo)
+        Q: [B, N, 3] target coordinates (gt)
+        ligand_mask: [N, 1] or [N], 1=ligand, 0=protein
+
+    Returns:
+        P_aligned: [B, N, 3] aligned P (all atoms)
+        Q_centered: [B, N, 3] centered Q (all atoms)
+        rmsd: [B] RMSD over protein atoms only
+    """
+    assert P.shape == Q.shape
+    B, N, _ = P.shape
+    device = P.device
+
+    # ---- mask handling ----
+    if ligand_mask.dim() == 2:
+        ligand_mask = ligand_mask.squeeze(-1)  # [N]
+
+    protein_mask = (ligand_mask == 0).to(P.dtype)  # [N]
+    protein_mask = protein_mask.view(1, N, 1)      # [1, N, 1]
+    protein_mask = protein_mask.to(device)
+
+    # number of protein atoms
+    num_protein = protein_mask.sum(dim=1, keepdim=True)  # [1,1,1]
+
+    # ---- masked centroids (protein only) ----
+    centroid_P = (P * protein_mask).sum(dim=1, keepdim=True) / num_protein
+    centroid_Q = (Q * protein_mask).sum(dim=1, keepdim=True) / num_protein
+
+    # ---- center all atoms ----
+    p = P - centroid_P
+    q = Q - centroid_Q
+
+    # ---- use protein atoms only to compute H ----
+    p_prot = p * protein_mask
+    q_prot = q * protein_mask
+
+    H = torch.matmul(p_prot.transpose(1, 2), q_prot)  # [B,3,3]
+
+    # ---- SVD ----
+    U, S, Vt = torch.linalg.svd(H.float())
+
+    # ---- right-handed correction ----
+    d = torch.det(Vt.transpose(1, 2) @ U.transpose(1, 2))
+    flip = d < 0
+    if flip.any():
+        Vt[flip, -1, :] *= -1.0
+
+    R = Vt.transpose(1, 2) @ U.transpose(1, 2)  # [B,3,3]
+
+    # ---- apply rotation to ALL atoms ----
+    P_aligned = torch.matmul(p, R.transpose(1, 2))
+    Q_centered = q
+
+    # ---- RMSD (protein only) ----
+    diff2 = ((P_aligned - Q_centered) ** 2) * protein_mask
+    rmsd = torch.sqrt(
+        diff2.sum(dim=(1, 2)) / num_protein.squeeze()
+    )
+    
+    # put the ligand to the center
+    ligand_mask = ligand_mask.to(bool)
+    mask = ligand_mask.view(1, -1, 1)
+    ligand_coords = P_aligned * mask
+    ligand_centroid = ligand_coords.sum(dim=1, keepdim=True) / mask.sum()
+    
+    P_centered = P_aligned.clone()
+    P_centered[mask.expand_as(P_aligned)] -= ligand_centroid.expand_as(P_aligned)[
+        mask.expand_as(P_aligned)
+    ]
+    
+    return P_centered, Q_centered, rmsd
+
+
+
 def get_bridge_scalings(ddbm_configs, sigma):
     if ddbm_configs["pred_mode"] == 've':
         A = (
@@ -1216,7 +1296,9 @@ def sample_diffusion_training_ddbm(
     
     # R, t, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
     # x_start = apo_atom_array @ R.transpose(-1, -2) + t.unsqueeze(-2)
-    x_start, x_gt_augment, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
+    is_ligand_mask = input_feature_dict['is_ligand']
+    x_start1, x_gt_augment1, rmsd = kabsch_torch_batched(apo_atom_array, x_gt_augment)
+    x_start, x_gt_augment, rmsd2 = kabsch_torch_batched_protein(apo_atom_array, x_gt_augment, is_ligand_mask.to(bool))
     input_feature_dict['apo_atom_array'] = x_start
     
     new_rmsd = torch.sqrt(torch.sum((x_start - x_gt_augment)**2, dim=(-1, -2)) / x_gt_augment.size(-2))

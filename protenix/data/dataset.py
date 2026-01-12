@@ -43,6 +43,8 @@ from protenix.utils.cropping import CropData
 from protenix.utils.file_io import read_indices_csv
 from protenix.utils.logger import get_logger
 from protenix.utils.torch_utils import dict_to_tensor
+from scipy.spatial.transform import Rotation
+
 
 logger = get_logger(__name__)
 
@@ -483,6 +485,10 @@ class BaseSingleDataset(Dataset):
             rdkit_coords = rdkit_coords[rdkit_idx]
             # align to the original point
             rdkit_coords = rdkit_coords - rdkit_coords.mean(axis=0)
+            rotation = Rotation.random(num=1)
+            rot_matrix = torch.from_numpy(rotation.as_matrix()).float()
+            rot_matrix = rot_matrix.squeeze(0).numpy()
+            rdkit_coords = rdkit_coords @ rot_matrix.T
             apo_coords = apo_coords - apo_coords.mean(axis=0)
             complex_apo_coords = np.concatenate((apo_coords, rdkit_coords), axis=0)
             bioassembly_dict['apo_atom_array'] = complex_apo_coords
