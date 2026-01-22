@@ -14,6 +14,7 @@
 
 import random
 import time
+import pdb
 from typing import Any, Optional
 
 import numpy as np
@@ -139,8 +140,25 @@ class Protenix(nn.Module):
                 self.esm_model.eval()
             self.esm_model_online = True
             logger.info("ESM model loaded successfully, load from the path {}".format(esm_configs.get('local_model_path', 'default path')))
+            # 记录ESM隐藏维度，可以简写一些
+            """
+            self.esm_dim = (
+                getattr(self.esm_model,"embed_dim",None)
+                or getattr(getattr(self.esm_model, "args", None), "embed_dim", None)
+                or getattr(getattr(self.esm_model, "embed_tokens", None), "embedding_dim", None)
+            )
+            if self.esm_dim is None:
+                if hasattr(self.esm_model, "embed_tokens") and hasattr(self.esm_model.embed_tokens, "weight"):
+                    self.esm_dim = int(self.esm_model.embed_tokens.weight.shape[1])
+                else:
+                    raise ValueError("Cannot infer esm_dim from esm_model; please set it manually.")
+            """
+            self.esm_dim = esm_configs.get("embedding_dim",None)
         else:
             self.esm_model_online = False
+            self.esm_dim = (
+                esm_configs.get("embedding_dim", None)  # 配置里面的config状态
+            )
             
             
         # load the molecular model
@@ -148,15 +166,21 @@ class Protenix(nn.Module):
         if unimol_configs is not None:
             self.use_unimol = True
             self.unimol_model = build_default_unimol_model(unimol_configs['mode'], unimol_configs['dict_path'])
+            self.unimol_dim = self.unimol_model.embed_tokens.embedding_dim # unimol hidden size
+            self.unimol_to_s_inputs = LinearNoBias(self.unimol_dim, configs.c_s_inputs) # 投影
+            nn.init.zeros_(self.unimol_to_s_inputs.weight)# 零初始化
+
             # load the pre-trained weights
             if 'pretrained_path' in unimol_configs:
                 unimol_state_dict = torch.load(unimol_configs['pretrained_path'], map_location='cpu')
                 missing_keys, unexpected_keys = self.unimol_model.load_state_dict(unimol_state_dict['model'], strict=False)
                 logger.info("UniMol model loaded successfully, load from the path {}".format(unimol_configs['pretrained_path']))
                 logger.info("Missing keys: {}".format(missing_keys))
-                logger.info("Unexpected keys: {}".format(unexpected_keys))
+                logger.info("Unexpected keys: {}".format(unexpected_keys))                
         else:
             self.use_unimol = False
+            self.unimol_dim = None # unimol
+
         self.input_embedder = InputFeatureEmbedder(
             **configs.model.input_embedder, esm_configs=esm_configs
         )
@@ -209,6 +233,17 @@ class Protenix(nn.Module):
         nn.init.zeros_(self.linear_no_bias_z_cycle.weight)
         nn.init.zeros_(self.linear_no_bias_s.weight)
 
+        # contrast model
+        self.contrast_dim = configs.get("contrast", {}).get("contrast_dim", 256)
+        self.logit_scale = nn.Parameter(torch.tensor(1.0))  # 或者用 CLIP 那种 exp(logit_sca
+        # 当esm 和unimol存在时建立投影头
+        if self.esm_dim is None or self.unimol_dim is None:
+            self.esm_proj = None
+            self.unimol_proj = None
+        else:
+            self.esm_proj = nn.Linear(self.esm_dim, self.contrast_dim, bias=False)
+            self.unimol_proj = nn.Linear(self.unimol_dim, self.contrast_dim, bias=False)
+
     def get_pairformer_output(
         self,
         input_feature_dict: dict[str, Any],
@@ -238,6 +273,12 @@ class Protenix(nn.Module):
         s_inputs = self.input_embedder(
             input_feature_dict, inplace_safe=False, chunk_size=chunk_size
         )  # [..., N_token, 449]
+
+        # 加入 UniMol 条件（token 级对齐后）
+        if self.use_unimol and ("unimol_s_inputs_add" in input_feature_dict):
+            s_inputs = s_inputs + input_feature_dict["unimol_s_inputs_add"].to(
+                device=s_inputs.device, dtype=s_inputs.dtype
+            )
         z_constraint = None
 
         if "constraint_feature" in input_feature_dict:
@@ -306,7 +347,6 @@ class Protenix(nn.Module):
                         triangle_multiplicative=self.configs.triangle_multiplicative,
                         triangle_attention=self.configs.triangle_attention,
                         inplace_safe=inplace_safe,
-                        chunk_size=chunk_size,
                     )
                 else:
                     if self.template_embedder.n_blocks > 0:
@@ -344,7 +384,8 @@ class Protenix(nn.Module):
             self.template_embedder.train()
             self.msa_module.train()
             self.pairformer_stack.train()
-
+        print("pairformer output 运行中!")
+        print("s_inputs", s_inputs.shape)
         return s_inputs, s, z
 
     def sample_diffusion(self, **kwargs) -> torch.Tensor:
@@ -872,12 +913,13 @@ class Protenix(nn.Module):
             input_feature_dict['esm_embeddings'] = esm_embeddings
             # print(esm_embeddings.shape)
         
-        if self.use_unimol:
+        if self.use_unimol:           
             # get the ligand atom and positions
             ligand_mask = input_feature_dict['is_ligand'] == 1  # [N_Atoms,]
             if ligand_mask.sum() > 0:
                 ligand_positions = input_feature_dict['ref_pos'][ligand_mask]  # [N_ligand_atoms, 3]
                 ligand_elements = input_feature_dict['ref_element'][ligand_mask]  # [N_ligand_atoms,
+                # n_ligand = int(ligand_positions.size(0))
                 # 128 
                 indices = torch.argmax(ligand_elements, dim=1).detach().cpu().numpy()
                 pt = Chem.GetPeriodicTable()
@@ -888,6 +930,26 @@ class Protenix(nn.Module):
                                "coordinates": ligand_positions}]
                 
                 mol_dataset = load_mols_dataset(ligand_dict, self.unimol_model.dictionary)
+                sample = next(iter(torch.utils.data.DataLoader(
+                    mol_dataset, batch_size=1, collate_fn=mol_dataset.collater
+                )))
+                unimol_device = next(self.unimol_model.parameters()).device
+                st   = sample["net_input"]["mol_src_tokens"].to(unimol_device)        # [1, L]
+                dist = sample["net_input"]["mol_src_distance"].to(unimol_device)      # [1, L, L]
+                et   = sample["net_input"]["mol_src_edge_type"].to(unimol_device)     # [1, L, L]
+
+                pad_mask = st.eq(self.unimol_model.padding_idx)  # [1, L]
+                x = self.unimol_model.embed_tokens(st)  
+                n = dist.size(-1)
+                gbf = self.unimol_model.gbf(dist, et)
+                gab = self.unimol_model.gbf_proj(gbf).permute(0, 3, 1, 2).contiguous().view(-1, n, n)
+
+                with torch.no_grad():
+                    token_states = self.unimol_model.encoder(x,padding_mask=pad_mask,attn_mask=gab)[0]
+                
+
+
+                """保留这个循环，还没明白循环的用途
                 bsz = 1
                 loader = torch.utils.data.DataLoader(
                     mol_dataset, batch_size=bsz, collate_fn=mol_dataset.collater
@@ -902,13 +964,15 @@ class Protenix(nn.Module):
                         st   = sample["net_input"]["mol_src_tokens"].cuda()
 
                         pad = st.eq(self.unimol_model.padding_idx)
-                        x   = self.unimol_model.embed_tokens(st)
+                        x   = self.unimol_model.embed_tokens(st) # [B ,L ,D unimol]
                         n   = dist.size(-1)
-                        gbf = self.unimol_model.gbf(dist, et)
-                        gab = self.unimol_model.gbf_proj(gbf).permute(0,3,1,2).contiguous().view(-1, n, n)
+                        gbf = self.unimol_model.gbf(dist, et) # 几何特征编码
+                        gab = self.unimol_model.gbf_proj(gbf).permute(0,3,1,2).contiguous().view(-1, n, n) # 几何特征投影
 
                         out = self.unimol_model.encoder(x, padding_mask=pad, attn_mask=gab)
-                        rep = out[0][:,0,:]                                  # [B, D]
+                        token_states = out[0]  #  [B, L, D_unimol] [1,16,512]
+                        rep = out[0][:,0,:]                                  #[B, D] [1,512]
+                        
                         # rep = self.model.mol_project(rep)                    # [B, d_proj]
                         # rep = rep / rep.norm(dim=-1, keepdim=True)           # cosine/IP 可互换
                         # reps.append(rep.detach().cpu().to(torch.float32).numpy())
@@ -918,9 +982,59 @@ class Protenix(nn.Module):
                     #     atom_elements=ligand_elements,
                     # )  # assume the unimol model returns a dict
                 # get the unimol embeddings
-                unimol_embeddings = out['embeddings']  # [N_ligand_atoms, unimol_dim]
-                input_feature_dict['unimol_embeddings'] = unimol_embeddings
-            
+                #unimol_embeddings = out['embeddings']  # [N_ligand_atoms, unimol_dim]
+                # atoms
+                pad_mask = pad
+                """
+                # 序列为BOS+ATOMS+EOS+PAD
+                valid_len = int((~pad_mask[0]).sum().item()) # 非pad token数
+                # 全局信息（constract用）
+                unimol_global = token_states[0,0,:] # D
+                # atoms 建模
+                atom_states_all = token_states[0,1:valid_len-1,:]
+                n_atoms_u = atom_states_all.size(0)
+
+                n_take = min(ligand_positions.size(0),n_atoms_u)
+                #atom_states = atom_states_all[:,n_take] # n_take,D
+                atom_states = atom_states_all[:n_take]        # [n_take, D_unimol]
+
+                # 对齐到protenix token n_token
+                ligand_atom_idx = ligand_mask.nonzero(as_tuple=False).squeeze(-1)[:n_take] # [n_take]
+                token_idx = input_feature_dict["atom_to_token_idx"][ligand_atom_idx].long().to(unimol_device)
+
+                N_token = int(input_feature_dict["token_index"].shape[-1])
+                D_unimol = int(atom_states.size(-1)) 
+
+                unimol_token = atom_states.new_zeros((N_token,D_unimol))
+                cnt = atom_states.new_zeros((N_token,1))  
+
+                unimol_token.index_add_(0,token_idx,atom_states)
+                cnt.index_add_(0,token_idx,torch.ones((n_take,1),device=unimol_device, dtype=atom_states.dtype))
+                unimol_token = unimol_token / (cnt +1e-6)
+
+                input_feature_dict["unimol_global_embedding"] = unimol_global # D
+                input_feature_dict["unimol_atom_embeddings"] = atom_states #n_toke,D
+                input_feature_dict["unimol_token_embeddings"] = unimol_token # N_token,D 结构生成
+                input_feature_dict["unimol_s_inputs_add"] = self.unimol_to_s_inputs(unimol_token) # [N_token,c_s_inputs]
+
+                print("unimol 完成了！")
+                print("valid_len", valid_len, "n_atoms_u", n_atoms_u, "n_ligand", n_ligand, "n_take", n_take)
+                print("unimol_token_embeddings", input_feature_dict["unimol_token_embeddings"].shape)
+                print("unimol_s_inputs_add", input_feature_dict["unimol_s_inputs_add"].shape)
+                #unimol_embeddings = out[0]  # [N_ligand_atoms, unimol_dim]
+                #input_feature_dict['unimol_embeddings'] = unimol_embeddings
+            else:
+                print("缺少ligand！全部填写为0！")
+                N_token = int(input_feature_dict["token_index"].shape[-1])
+                unimol_device = next(self.unimol_model.parameters()).device
+                D_unimol = int(self.unimol_dim)
+
+                input_feature_dict["unimol_global_embedding"] = torch.zeros(D_unimol, device=unimol_device)
+                input_feature_dict["unimol_token_embeddings"] = torch.zeros((N_token, D_unimol), device=unimol_device)
+                input_feature_dict["unimol_s_inputs_add"] = self.unimol_to_s_inputs(input_feature_dict["unimol_token_embeddings"])
+
+
+        #pdb.set_trace()
         
         if mode == "train":
             nc_rng = np.random.RandomState(current_step)

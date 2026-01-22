@@ -121,7 +121,7 @@ default_weighted_pdb_configs = {
     },
 }
 
-DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/vepfs-mlp2/mlp-public/shikunfeng/Datas/Proteinix")
+DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/home/dataset-local/tmp/zsl/Protenix/release_data")
 
 # Use CCD cache created by scripts/gen_ccd_cache.py priority. (without date in filename)
 # See: docs/prepare_data.md

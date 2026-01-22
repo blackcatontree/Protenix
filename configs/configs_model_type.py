@@ -481,11 +481,13 @@ model_configs = {
     },
     # esm 650M training
     "protenix_mini_esm_trainable_650m_v0.1.0_unimol": {
+        # 扩散模型
         # "sample_diffusion": {
         #     "gamma0": 0,
         #     "step_scale_eta": 1.0,
         #     "N_step": 5,
         # },  # the default setting for mini model, we didn't change diffusion settings here
+        # protenix主干网络结构配置
         "model": {
             "N_cycle": 4,
             "msa_module": {
@@ -506,19 +508,20 @@ model_configs = {
                 },
             },
         },
+        # ESM2语言模型相关配置
         "esm": {
             "esm_model_online": True,
-            "enable": True,
+            "enable": True, 
             "model_name": "esm2_t33_650M_UR50D",
             "esm_trainable": True,
             "embedding_dim": 1280,
-            "local_model_path": '/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/./release_data/checkpoint/',
+            "local_model_path": '/home/dataset-local/tmp/zsl/Protenix/weight/',
             "truncation_seq_length": 1024, 
         },
         "unimol": {
             "mode": "train",
-            "dict_path": "/vepfs-mlp2/mlp-public/shikunfeng/Project/Protenix/protenix/model/unimol/data",
-            "pretrained_path": "/vepfs-mlp2/mlp-public/shikunfeng/Datas/UniMol_Data/models/mol_pre_no_h_220816.pt",
+            "dict_path": "/home/dataset-local/tmp/zsl/Protenix/protenix/model/unimol/data",
+            "pretrained_path": "/home/dataset-local/tmp/zsl/Protenix/weight/mol_pre_no_h_220816.pt",
         },
         "load_strict": False,  # For inference, it should be True.
         "use_msa": False,  # For efficiency, this model does not use MSA by default.
@@ -561,4 +564,52 @@ model_configs = {
         "load_strict": False,  # For inference, it should be True.
         "use_msa": False,  # For efficiency, this model does not use MSA by default.
     },
+    # esm unimol contrast base
+    "protenix_mini_esm650m_unimol_contrast_v0.2.0":{
+        "model":{
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True, 
+            "model_name": "esm2_t33_650M_UR50D",
+            "esm_trainable": True,
+            "embedding_dim": 1280,
+            "local_model_path": '/home/dataset-local/tmp/zsl/Protenix/weight/',
+            "truncation_seq_length": 1024, 
+        },
+        "unimol": {
+            "mode": "train",
+            "dict_path": "/home/dataset-local/tmp/zsl/Protenix/protenix/model/unimol/data",
+            "pretrained_path": "/home/dataset-local/tmp/zsl/Protenix/weight/mol_pre_no_h_220816.pt",
+            "unimol_trainable":False
+        },
+        "contrast":{
+            "enable":True,
+            "contrast_dim": 256,
+            "loss_weight": 1.0,
+            "freeze_esm":True,
+            "freeze_unimol":True
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+        
+    }
 }
