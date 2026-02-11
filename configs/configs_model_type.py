@@ -30,6 +30,8 @@ Currently, the model_name support the following models.
 | `protenix_mini_ism_v0.5.0`          |      ✅ / ✅ / ❌         |         135.22       |
 | `protenix_mini_default_v0.5.0`      |      ❌ / ✅ / ❌         |         134.06       |
 | `protenix_tiny_default_v0.5.0`      |      ❌ / ✅ / ❌         |         109.50       |
+| "protenix_mini_esm650m_unimol_contrast_v0.2.0"| yes/yes/yes|?| 完成了基础的模型搭建
+| 将qbiolip接入
 """
 model_configs = {
     "protenix_base_default_v0.5.0": {
@@ -590,7 +592,7 @@ model_configs = {
             "esm_model_online": True,
             "enable": True, 
             "model_name": "esm2_t33_650M_UR50D",
-            "esm_trainable": True,
+            "esm_trainable": False,
             "embedding_dim": 1280,
             "local_model_path": '/home/dataset-local/tmp/zsl/Protenix/weight/',
             "truncation_seq_length": 1024, 
@@ -599,14 +601,64 @@ model_configs = {
             "mode": "train",
             "dict_path": "/home/dataset-local/tmp/zsl/Protenix/protenix/model/unimol/data",
             "pretrained_path": "/home/dataset-local/tmp/zsl/Protenix/weight/mol_pre_no_h_220816.pt",
-            "unimol_trainable":False
+            "unimol_trainable":False,
+            
         },
         "contrast":{
             "enable":True,
             "contrast_dim": 256,
             "loss_weight": 1.0,
-            "freeze_esm":True,
-            "freeze_unimol":True
+            # If true, freeze backbone (protenix, esm, unimol) and only train projection MLP and logit_scale
+            "train_projection_only": True,
+
+        },
+        "load_strict": False,  # For inference, it should be True.
+        "use_msa": False,  # For efficiency, this model does not use MSA by default.
+        
+    },
+    # v2.1 增加qbiolip
+    "protenix_mini_esm650m_unimol_contrast_v0.2.1":{
+        "model":{
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True, 
+            "model_name": "esm2_t33_650M_UR50D",
+            "esm_trainable": False,
+            "embedding_dim": 1280,
+            "local_model_path": '/home/dataset-local/tmp/zsl/Protenix/weight/',
+            "truncation_seq_length": 1024, 
+        },
+        "unimol": {
+            "mode": "train",
+            "dict_path": "/home/dataset-local/tmp/zsl/Protenix/protenix/model/unimol/data",
+            "pretrained_path": "/home/dataset-local/tmp/zsl/Protenix/weight/mol_pre_no_h_220816.pt",
+            "unimol_trainable":False,
+            
+        },
+        "contrast":{
+            "enable":True,
+            "contrast_dim": 256,
+            "loss_weight": 1.0,
+
         },
         "load_strict": False,  # For inference, it should be True.
         "use_msa": False,  # For efficiency, this model does not use MSA by default.

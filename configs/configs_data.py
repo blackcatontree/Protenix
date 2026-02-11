@@ -182,7 +182,7 @@ data_configs = {
     "epoch_size": 10000,
     "train_ref_pos_augment": True,
     "test_ref_pos_augment": True,
-    "train_sets": ListValue(["weightedPDB_before2109_wopb_nometalc_0925"]),
+    "train_sets": ListValue(["weightedPDB_before2109_wopb_nometalc_0925", "qbiolip_nonredund"]),
     "train_sampler": {
         "train_sample_weights": ListValue([1.0]),
         "sampler_type": "weighted",
@@ -218,6 +218,22 @@ data_configs = {
             "pdb_list": "",
             "random_sample_if_failed": True,
             "max_n_token": -1,  # can be used for removing data with too many tokens.
+            "use_reference_chains_only": False,
+            "exclusion": {  # do not sample the data based on ions.
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+    },
+    "qbiolip_nonredund": {
+        "base_info": {
+            "mmcif_dir": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/mmcif",
+            "bioassembly_dict_dir": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/bioassembly",
+            "indices_fpath": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/indices_ligand_prot_clean.csv",
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,
             "use_reference_chains_only": False,
             "exclusion": {  # do not sample the data based on ions.
                 "mol_1_type": ListValue(["ions"]),

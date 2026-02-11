@@ -195,6 +195,37 @@ class AF3Trainer(object):
         
         self.raw_model = Protenix(self.configs).to(self.device)
 
+        # Optionally freeze backbone and only train projection layers (ESM/UniMol projection + logit_scale)
+        contrast_cfg = getattr(self.configs, "contrast", {})
+        if isinstance(contrast_cfg, dict):
+            train_proj_only = contrast_cfg.get("train_projection_only", False)
+        else:
+            train_proj_only = getattr(contrast_cfg, "get", lambda k, d: d)("train_projection_only", False)
+
+        if train_proj_only:
+            # 1. freeze all params
+            for p in self.raw_model.parameters():
+                p.requires_grad = False
+
+            # 2. unfreeze projection layers if they exist
+            unfreeze_modules = []
+            if getattr(self.raw_model, "esm_proj", None) is not None:
+                unfreeze_modules.append(self.raw_model.esm_proj)
+            if getattr(self.raw_model, "unimol_proj", None) is not None:
+                unfreeze_modules.append(self.raw_model.unimol_proj)
+            # also unfreeze logit scale
+            if getattr(self.raw_model, "logit_scale", None) is not None:
+                self.raw_model.logit_scale.requires_grad = True
+
+            for m in unfreeze_modules:
+                for p in m.parameters():
+                    p.requires_grad = True
+
+            # set appropriate train/eval modes: backbone eval, projection train
+            self.raw_model.eval()
+            for m in unfreeze_modules:
+                m.train()
+
         self.only_diffusion_module_train = self.configs.model.only_diffusion_module_train
         if self.only_diffusion_module_train:
             # 1. 先 freeze 全部参数
@@ -254,6 +285,23 @@ class AF3Trainer(object):
             self.model,
             param_names=self.configs.get("finetune_params_with_substring", [""]),
         )
+        # Debug print: when training only projection MLPs, print optimizer param groups and requires_grad
+        try:
+            if train_proj_only:
+                trainable = [
+                    (name, p.shape, p.requires_grad)
+                    for name, p in self.model.named_parameters()
+                    if p.requires_grad
+                ]
+                self.print(f"train_proj_only active: {len(trainable)} parameter tensors trainable")
+                for name, shape, req in trainable:
+                    self.print(f"param: {name}, shape={tuple(shape)}, requires_grad={req}")
+                for i, g in enumerate(self.optimizer.param_groups):
+                    n = sum(p.numel() for p in g["params"])
+                    self.print(f"optimizer.param_group[{i}] size={n}, lr={g.get('lr', None)}")
+        except Exception as e:
+            self.print(f"Failed to print optimizer param groups: {e}")
+
         self.init_scheduler()
 
     def init_scheduler(self, **kwargs):
@@ -713,7 +761,12 @@ class AF3Trainer(object):
             if is_loss_nan_check(loss):
                 self.print(f"Skip iteration with NaN loss: {self.step} steps")
                 loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
-        scaler.scale(loss / self.iters_to_accumulate).backward()
+
+        # If loss does not require grad (no trainable params connected), skip backward
+        if not getattr(loss, 'requires_grad', False):
+            self.print(f"Skipping backward: loss has no grad (step {self.step})")
+        else:
+            scaler.scale(loss / self.iters_to_accumulate).backward()
 
         # For simplicity, the global training step is used
         if (self.global_step + 1) % self.iters_to_accumulate == 0:

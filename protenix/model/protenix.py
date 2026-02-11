@@ -165,10 +165,11 @@ class Protenix(nn.Module):
         unimol_configs = configs.get("unimol", None)
         if unimol_configs is not None:
             self.use_unimol = True
+            self.unimol_trainable = bool(unimol_configs.get("unimol_trainable", False))  # unimol trainable
             self.unimol_model = build_default_unimol_model(unimol_configs['mode'], unimol_configs['dict_path'])
-            self.unimol_dim = self.unimol_model.embed_tokens.embedding_dim # unimol hidden size
-            self.unimol_to_s_inputs = LinearNoBias(self.unimol_dim, configs.c_s_inputs) # 投影
-            nn.init.zeros_(self.unimol_to_s_inputs.weight)# 零初始化
+            self.unimol_dim = self.unimol_model.embed_tokens.embedding_dim  # unimol hidden size
+            self.unimol_to_s_inputs = LinearNoBias(self.unimol_dim, configs.c_s_inputs)  # 投影
+            nn.init.zeros_(self.unimol_to_s_inputs.weight)  # 零初始化
 
             # load the pre-trained weights
             if 'pretrained_path' in unimol_configs:
@@ -176,10 +177,10 @@ class Protenix(nn.Module):
                 missing_keys, unexpected_keys = self.unimol_model.load_state_dict(unimol_state_dict['model'], strict=False)
                 logger.info("UniMol model loaded successfully, load from the path {}".format(unimol_configs['pretrained_path']))
                 logger.info("Missing keys: {}".format(missing_keys))
-                logger.info("Unexpected keys: {}".format(unexpected_keys))                
+                logger.info("Unexpected keys: {}".format(unexpected_keys))
         else:
             self.use_unimol = False
-            self.unimol_dim = None # unimol
+            self.unimol_dim = None  # unimol
 
         self.input_embedder = InputFeatureEmbedder(
             **configs.model.input_embedder, esm_configs=esm_configs
@@ -235,14 +236,35 @@ class Protenix(nn.Module):
 
         # contrast model
         self.contrast_dim = configs.get("contrast", {}).get("contrast_dim", 256)
-        self.logit_scale = nn.Parameter(torch.tensor(1.0))  # 或者用 CLIP 那种 exp(logit_sca
+        contrast_cfg = configs.get("contrast",{})
+        mlp_hidden = int(contrast_cfg.get("mlp_hidden",1024))
+        # clip风格
+        init_temp = float(contrast_cfg.get("init_temp",0.07))
+        self.logit_scale = nn.Parameter(torch.tensor(np.log(1.0 / init_temp), dtype=torch.float32))
+        #self.logit_scale = nn.Parameter(torch.tensor(1.0))  # 或者用 CLIP 那种 exp(logit_sca
+        
+        # mlp
+        def _mlp(in_dim: int, out_dim: int):
+            # 至少两层 ReLU => 至少 3 个 Linear
+            return nn.Sequential(
+                nn.LayerNorm(in_dim),
+                nn.Linear(in_dim, mlp_hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(mlp_hidden, mlp_hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(mlp_hidden, out_dim, bias=False),
+            )
+
+
         # 当esm 和unimol存在时建立投影头
         if self.esm_dim is None or self.unimol_dim is None:
             self.esm_proj = None
             self.unimol_proj = None
         else:
-            self.esm_proj = nn.Linear(self.esm_dim, self.contrast_dim, bias=False)
-            self.unimol_proj = nn.Linear(self.unimol_dim, self.contrast_dim, bias=False)
+            #self.esm_proj = nn.Linear(self.esm_dim, self.contrast_dim, bias=False)
+            #self.unimol_proj = nn.Linear(self.unimol_dim, self.contrast_dim, bias=False)
+            self.esm_proj = _mlp(self.esm_dim, self.contrast_dim)
+            self.unimol_proj = _mlp(self.unimol_dim, self.contrast_dim)
 
     def get_pairformer_output(
         self,
@@ -388,6 +410,27 @@ class Protenix(nn.Module):
         print("s_inputs", s_inputs.shape)
         return s_inputs, s, z
 
+    # pool_esm_embedding
+    @staticmethod
+    def _pool_esm_global(esm_embeddings):
+        if esm_embeddings is None:
+            return None
+        total = None #D
+        n = 0 # 总残基
+        for v in esm_embeddings.values():
+            if v is None:
+                continue
+            if total is None:
+                total = v.new_zeros(v.size(-1))
+            total  += v.sum(dim=0)
+            n += v.size(0)
+        # 解决esm没有蛋白质时的崩溃
+        if total is None or n ==0:
+            print("没有esm的信息，回退到0")
+            return None
+
+        return total/n
+    
     def sample_diffusion(self, **kwargs) -> torch.Tensor:
         """
         Samples diffusion process based on the provided configurations.
@@ -919,7 +962,7 @@ class Protenix(nn.Module):
             if ligand_mask.sum() > 0:
                 ligand_positions = input_feature_dict['ref_pos'][ligand_mask]  # [N_ligand_atoms, 3]
                 ligand_elements = input_feature_dict['ref_element'][ligand_mask]  # [N_ligand_atoms,
-                # n_ligand = int(ligand_positions.size(0))
+                n_ligand = int(ligand_positions.size(0))
                 # 128 
                 indices = torch.argmax(ligand_elements, dim=1).detach().cpu().numpy()
                 pt = Chem.GetPeriodicTable()
@@ -943,12 +986,11 @@ class Protenix(nn.Module):
                 n = dist.size(-1)
                 gbf = self.unimol_model.gbf(dist, et)
                 gab = self.unimol_model.gbf_proj(gbf).permute(0, 3, 1, 2).contiguous().view(-1, n, n)
-
-                with torch.no_grad():
-                    token_states = self.unimol_model.encoder(x,padding_mask=pad_mask,attn_mask=gab)[0]
-                
-
-
+                if self.unimol_trainable:
+                    token_states = self.unimol_model.encoder(x, padding_mask=pad_mask, attn_mask=gab)[0]
+                else:
+                    with torch.no_grad():
+                        token_states = self.unimol_model.encoder(x,padding_mask=pad_mask,attn_mask=gab)[0]
                 """保留这个循环，还没明白循环的用途
                 bsz = 1
                 loader = torch.utils.data.DataLoader(
@@ -1019,12 +1061,20 @@ class Protenix(nn.Module):
 
                 print("unimol 完成了！")
                 print("valid_len", valid_len, "n_atoms_u", n_atoms_u, "n_ligand", n_ligand, "n_take", n_take)
+                print("is_ligand_sum", input_feature_dict.get("is_ligand", None).sum() if input_feature_dict.get("is_ligand", None) is not None else None)
                 print("unimol_token_embeddings", input_feature_dict["unimol_token_embeddings"].shape)
                 print("unimol_s_inputs_add", input_feature_dict["unimol_s_inputs_add"].shape)
                 #unimol_embeddings = out[0]  # [N_ligand_atoms, unimol_dim]
                 #input_feature_dict['unimol_embeddings'] = unimol_embeddings
             else:
                 print("缺少ligand！全部填写为0！")
+                print("DEBUG: input_feature_dict keys:", list(input_feature_dict.keys()))
+                print("DEBUG: is_ligand present?", "is_ligand" in input_feature_dict)
+                if "is_ligand" in input_feature_dict:
+                    try:
+                        print("DEBUG: is_ligand sum", input_feature_dict["is_ligand"].sum().item())
+                    except Exception:
+                        pass
                 N_token = int(input_feature_dict["token_index"].shape[-1])
                 unimol_device = next(self.unimol_model.parameters()).device
                 D_unimol = int(self.unimol_dim)
@@ -1032,6 +1082,50 @@ class Protenix(nn.Module):
                 input_feature_dict["unimol_global_embedding"] = torch.zeros(D_unimol, device=unimol_device)
                 input_feature_dict["unimol_token_embeddings"] = torch.zeros((N_token, D_unimol), device=unimol_device)
                 input_feature_dict["unimol_s_inputs_add"] = self.unimol_to_s_inputs(input_feature_dict["unimol_token_embeddings"])
+
+
+
+        # contrast
+        contrast_cfg = self.configs.get("contrast",{})
+        contrast_enable = bool(contrast_cfg.get("enable",False))
+        contrast_out = {}
+        if contrast_enable and (self.esm_proj is not None) and (self.unimol_proj is not None):
+            # 只有ligand存在的时候才进行contrast
+            has_ligand = (input_feature_dict["is_ligand"].sum() >0 ).item()
+            if has_ligand:
+                # get input
+                lig_global = input_feature_dict["unimol_global_embedding"].to(device=unimol_device)   # [512] 或 [B,512]
+                prot_global_raw = input_feature_dict.get("esm_embeddings", None)
+                prot_global = self._pool_esm_global(prot_global_raw)
+                # if esm embeddings missing, fallback to zero vector to avoid crash
+                if prot_global is None:
+                    esm_dim = getattr(self, "esm_dim", None) or 1280
+                    prot_global = torch.zeros(esm_dim, device=unimol_device)
+                else:
+                    prot_global = prot_global.to(device=unimol_device) # D_esm
+                # B dim for 1 dim
+                if lig_global.dim() == 1:
+                    lig_global = lig_global.unsqueeze(0)
+                if prot_global.dim() == 1:
+                    prot_global = prot_global.unsqueeze(0)
+                # others b dim 
+
+                
+
+                prot_z = torch.nn.functional.normalize(self.esm_proj(prot_global), dim=-1)
+                lig_z  = torch.nn.functional.normalize(self.unimol_proj(lig_global), dim=-1)
+                # valid mask per-sample (batch dim)
+                try:
+                    valid_mask = torch.ones(prot_global.shape[0], device=prot_global.device, dtype=torch.float32)
+                except Exception:
+                    valid_mask = torch.tensor([1.0], device=prot_global.device)
+                # 投影到 contrast_dim
+                contrast_out = {
+                                "contrast_prot_z":prot_z,
+                                "contrast_lig_z":lig_z,
+                                "contrast_logit_scale":self.logit_scale,
+                                "contrast_valid_mask": valid_mask,
+                                }
 
 
         #pdb.set_trace()
@@ -1103,5 +1197,9 @@ class Protenix(nn.Module):
                 symmetric_permutation=symmetric_permutation,
             )
             log_dict.update({"time": time_tracker})
+            # lig_unimol 和 prot_esm加入到pred_dict 中
+        # 全局增加contrast_out 
+        if contrast_out:
+            pred_dict.update(contrast_out)
 
         return pred_dict, label_dict, log_dict

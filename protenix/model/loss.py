@@ -18,6 +18,9 @@ from typing import Any, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+
+import math
 
 from protenix.metrics.rmsd import weighted_rigid_align
 from protenix.model.modules.frames import (
@@ -1418,6 +1421,138 @@ class PLDDTLoss(nn.Module):
 
         return loss
 
+class _GatherLayer(torch.autograd.Function):
+    """
+    all_gather with backward support.
+    Assumes each rank inputs same shape (we will pad to max_B).
+    """
+    @staticmethod
+    def forward(ctx, x):
+        if not (dist.is_available() and dist.is_initialized()):
+            ctx.rank = 0
+            ctx.world = 1
+            return (x,)
+
+        ctx.rank = dist.get_rank()
+        ctx.world = dist.get_world_size()
+
+        out = [torch.zeros_like(x) for _ in range(ctx.world)]
+        dist.all_gather(out, x)
+        return tuple(out)
+
+    @staticmethod
+    def backward(ctx, *grads):
+        grad = grads[ctx.rank]
+        if ctx.world > 1:
+            dist.all_reduce(grad)
+        return grad
+
+
+class ContrastiveCLIPLoss(nn.Module):
+    def __init__(self, max_scale: float = 100.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.max_scale = max_scale
+        self.eps = eps
+
+    @staticmethod
+    def _dist_is_init() -> bool:
+        return dist.is_available() and dist.is_initialized()
+
+    def _gather_global(self, x: torch.Tensor, gather_with_grad: bool):
+        """
+        x: [B, D]
+        Returns:
+            x_all: [B_total, D]
+            offset: global start index of this rank
+            sizes: list[int] local B for each rank
+        """
+        if not self._dist_is_init():
+            return x, 0, [x.size(0)]
+
+        B = x.size(0)
+        device = x.device
+
+        # gather sizes
+        sizes_t = torch.tensor([B], device=device, dtype=torch.int32)
+        sizes_list = [torch.zeros_like(sizes_t) for _ in range(dist.get_world_size())]
+        dist.all_gather(sizes_list, sizes_t)
+        sizes = [int(s.item()) for s in sizes_list]
+        max_B = max(sizes)
+
+        # pad to max_B
+        if B < max_B:
+            pad = x.new_zeros((max_B - B, x.size(1)))
+            x_pad = torch.cat([x, pad], dim=0)
+        else:
+            x_pad = x
+
+        # gather
+        if gather_with_grad:
+            chunks = _GatherLayer.apply(x_pad)  # tuple of [max_B, D]
+        else:
+            chunks = [torch.zeros_like(x_pad) for _ in range(dist.get_world_size())]
+            dist.all_gather(chunks, x_pad.detach())
+            chunks[dist.get_rank()] = x_pad
+
+        # trim padding
+        x_all = torch.cat([c[:sz] for c, sz in zip(chunks, sizes)], dim=0)
+        offset = sum(sizes[:dist.get_rank()])
+        return x_all, offset, sizes
+
+    def forward(self, prot_z, lig_z, logit_scale, valid_mask=None):
+        # [D] -> [1, D]
+        if prot_z.dim() == 1:
+            prot_z = prot_z.unsqueeze(0)
+        if lig_z.dim() == 1:
+            lig_z = lig_z.unsqueeze(0)
+
+        B, D = prot_z.shape
+        assert lig_z.shape == (B, D)
+
+        if valid_mask is None:
+            valid_mask = prot_z.new_ones((B,), dtype=torch.float32)
+        else:
+            valid_mask = valid_mask.view(-1).to(device=prot_z.device, dtype=torch.float32)
+            assert valid_mask.shape[0] == B
+
+        prot_z = F.normalize(prot_z, dim=-1)
+        lig_z  = F.normalize(lig_z,  dim=-1)
+
+        prot_all, offset, _ = self._gather_global(prot_z, gather_with_grad=True)
+        lig_all,  _,     _  = self._gather_global(lig_z,  gather_with_grad=True)
+
+        # gather valid mask (no grad needed)
+        valid_all, _, _ = self._gather_global(valid_mask[:, None], gather_with_grad=False)
+        valid_all = valid_all.squeeze(-1)  # [B_total]
+
+        scale = logit_scale.exp().clamp(max=self.max_scale)
+
+        logits_p = (scale * (prot_z @ lig_all.t())).float()   # [B, B_total]
+        logits_l = (scale * (lig_z  @ prot_all.t())).float()  # [B, B_total]
+
+        # mask invalid columns (do not treat invalid samples as negatives)
+        invalid_cols = valid_all <= 0.0
+        if invalid_cols.any():
+            logits_p = logits_p.masked_fill(invalid_cols[None, :], -1e9)
+            logits_l = logits_l.masked_fill(invalid_cols[None, :], -1e9)
+
+        labels = torch.arange(B, device=prot_z.device) + offset
+
+        loss_p = F.cross_entropy(logits_p, labels, reduction="none")  # [B]
+        loss_l = F.cross_entropy(logits_l, labels, reduction="none")  # [B]
+        loss = 0.5 * (loss_p + loss_l)                                # [B]
+
+        # only count valid rows
+        denom = valid_mask.sum() + self.eps
+        loss = (loss * valid_mask).sum() / denom
+
+        metrics = {
+            "logit_scale": scale.detach(),
+            "valid_local": valid_mask.sum().detach(),
+            "valid_global": valid_all.sum().detach(),
+            "global_batch": torch.tensor(lig_all.size(0), device=prot_z.device, dtype=torch.float32),
+        }
+        return loss, metrics
 
 class ProtenixLoss(nn.Module):
     """Aggregation of the various losses"""
@@ -1463,6 +1598,13 @@ class ProtenixLoss(nn.Module):
         self.bond_loss = BondLoss(**configs.loss.diffusion.bond)
         self.smooth_lddt_loss = SmoothLDDTLoss(**configs.loss.diffusion.smooth_lddt)
         self.distogram_loss = DistogramLoss(**configs.loss.distogram)
+
+        # contrast
+        self.contrast_enable = hasattr(configs, "contrast") and configs.contrast.enable
+        if self.contrast_enable:
+            self.contrast_loss = ContrastiveCLIPLoss(max_scale=100.0)
+            self.loss_weight["contrast_loss"] = float(configs.contrast.loss_weight)
+
 
     def calculate_label(
         self,
@@ -1702,6 +1844,17 @@ class ProtenixLoss(nn.Module):
                         )
                     }
                 )
+            if (mode == "train") and self.contrast_enable:
+                # 要求 pred_dict 一定有这几个 key（所以 forward 那边要改成每步都输出）
+                if all(k in pred_dict for k in ["contrast_prot_z", "contrast_lig_z", "contrast_logit_scale", "contrast_valid_mask"]):
+                    loss_fns.update({
+                        "contrast_loss": lambda: self.contrast_loss(
+                            prot_z=pred_dict["contrast_prot_z"],
+                            lig_z=pred_dict["contrast_lig_z"],
+                            logit_scale=pred_dict["contrast_logit_scale"],
+                            valid_mask=pred_dict["contrast_valid_mask"],
+                        )
+                    })
 
         # Confidence Loss:
         # Only when resoluton is in [min_resolution, max_resolution] the confidence loss is considered
