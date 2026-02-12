@@ -125,9 +125,9 @@ DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/home/dataset-local/tm
 
 # Use CCD cache created by scripts/gen_ccd_cache.py priority. (without date in filename)
 # See: docs/prepare_data.md
-CCD_COMPONENTS_FILE_PATH = os.path.join(DATA_ROOT_DIR, "components.cif")
+CCD_COMPONENTS_FILE_PATH = os.path.join(DATA_ROOT_DIR, "ccd_cache","components.cif")
 CCD_COMPONENTS_RDKIT_MOL_FILE_PATH = os.path.join(
-    DATA_ROOT_DIR, "components.cif.rdkit_mol.pkl"
+    DATA_ROOT_DIR,"ccd_cache","components.cif.rdkit_mol.pkl"
 )
 PDB_CLUSTER_FILE_PATH = os.path.join(DATA_ROOT_DIR, "clusters-by-entity-40.txt")
 
@@ -230,7 +230,7 @@ data_configs = {
         "base_info": {
             "mmcif_dir": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/mmcif",
             "bioassembly_dict_dir": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/bioassembly",
-            "indices_fpath": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/indices_ligand_prot_clean.csv",
+            "indices_fpath": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/indices_final.csv",
             "pdb_list": "",
             "random_sample_if_failed": True,
             "max_n_token": -1,

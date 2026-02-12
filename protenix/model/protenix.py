@@ -1089,6 +1089,7 @@ class Protenix(nn.Module):
         contrast_cfg = self.configs.get("contrast",{})
         contrast_enable = bool(contrast_cfg.get("enable",False))
         contrast_out = {}
+        """之前需要控制是否进入
         if contrast_enable and (self.esm_proj is not None) and (self.unimol_proj is not None):
             # 只有ligand存在的时候才进行contrast
             has_ligand = (input_feature_dict["is_ligand"].sum() >0 ).item()
@@ -1096,6 +1097,7 @@ class Protenix(nn.Module):
                 # get input
                 lig_global = input_feature_dict["unimol_global_embedding"].to(device=unimol_device)   # [512] 或 [B,512]
                 prot_global_raw = input_feature_dict.get("esm_embeddings", None)
+                
                 prot_global = self._pool_esm_global(prot_global_raw)
                 # if esm embeddings missing, fallback to zero vector to avoid crash
                 if prot_global is None:
@@ -1127,6 +1129,55 @@ class Protenix(nn.Module):
                                 "contrast_valid_mask": valid_mask,
                                 }
 
+        """
+        # contrast
+        contrast_cfg = self.configs.get("contrast", {})
+        contrast_enable = bool(contrast_cfg.get("enable", False))
+        contrast_out = {}
+
+        if contrast_enable and (self.esm_proj is not None) and (self.unimol_proj is not None):
+            # 是否真的有 ligand（用于 mask，不用于控制是否计算）
+            has_ligand = (input_feature_dict["is_ligand"].sum() > 0).item()
+
+            # --- always build embeddings on every rank ---
+            lig_global = input_feature_dict["unimol_global_embedding"].to(device=unimol_device)  # [D_unimol]
+            prot_global_raw = input_feature_dict.get("esm_embeddings", None)
+            prot_global = self._pool_esm_global(prot_global_raw)
+
+            if prot_global is None:
+                esm_dim = getattr(self, "esm_dim", None) or 1280
+                prot_global = torch.zeros(esm_dim, device=unimol_device)
+            else:
+                prot_global = prot_global.to(device=unimol_device)
+
+            # --- always run projections so parameters are always used ---
+            prot_z = self.esm_proj(prot_global)      # [D_proj]
+            lig_z  = self.unimol_proj(lig_global)    # [D_proj]
+
+            # valid mask: 1 if has ligand else 0
+            valid = torch.tensor([1.0 if has_ligand else 0.0], device=unimol_device, dtype=torch.float32)
+
+            # contrast_out = {
+            #     "contrast_prot_z": prot_z,
+            #     "contrast_lig_z": lig_z,
+            #     "contrast_logit_scale": self.logit_scale,   # IMPORTANT: use the PARAMETER here
+            #     "contrast_valid_mask": valid,
+            # }
+            scale = self.logit_scale.exp()  # non-leaf tensor，有 grad_fn
+            contrast_out = {
+                "contrast_prot_z": prot_z,
+                "contrast_lig_z": lig_z,
+                "contrast_logit_scale": scale,
+                # 如果你还想记录原始 log 值用于日志：
+                "contrast_logit_scale_log": self.logit_scale.detach(),
+                "contrast_valid_mask": valid,
+            }
+            print("logit_scale is_leaf:", self.logit_scale.is_leaf, "grad_fn:", self.logit_scale.grad_fn)
+            print("out_scale is_leaf:", scale.is_leaf, "grad_fn:", scale.grad_fn)
+
+
+
+        #pred_dict.update(contrast_out)
 
         #pdb.set_trace()
         

@@ -1286,9 +1286,33 @@ def get_datasets(
 
     data_config = configs.data
     logger.info(f"Using train sets {data_config.train_sets}")
-    assert len(data_config.train_sets) == len(
-        data_config.train_sampler.train_sample_weights
-    )
+    # Robust handling for train sample weights:
+    # - If not provided, default to uniform weights (1.0) for each train set
+    # - If a single weight is provided, broadcast it to all train sets
+    # - Otherwise require lengths to match
+    num_train_sets = len(data_config.train_sets)
+    sampler_cfg = data_config.get("train_sampler", {})
+    # sampler_cfg may be a dict-like ConfigDict
+    try:
+        weights_cfg = sampler_cfg.get("train_sample_weights", None)
+    except Exception:
+        weights_cfg = getattr(sampler_cfg, "train_sample_weights", None)
+
+    if weights_cfg is None:
+        logger.warning(
+            "train_sample_weights not set; defaulting to 1.0 per train set"
+        )
+        train_sample_weights = [1.0] * num_train_sets
+    else:
+        train_sample_weights = list(weights_cfg)
+        if len(train_sample_weights) == 1 and num_train_sets > 1:
+            # broadcast single weight to all train sets
+            train_sample_weights = train_sample_weights * num_train_sets
+
+    if len(train_sample_weights) != num_train_sets:
+        raise ValueError(
+            f"train_sample_weights length ({len(train_sample_weights)}) does not match number of train_sets ({num_train_sets})"
+        )
     train_datasets = []
     datapoint_weights = []
     

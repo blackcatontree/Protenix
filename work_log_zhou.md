@@ -131,7 +131,7 @@ qbiolip 输出为:
 3. 对比学习投影，我就只用了一个line投影到258维？不行，用MLP
 4. 接下来是冻结unimol 和 esm protenix 直接训练 投影吗？不一定是冻结esm和unimol，反正protenix是一定要修改的，需要开放mlp和unimol，esm不一定要开放
 5.
-### 修改完成qbiolip
+### 修改完成qbiolip(单卡)
 export CC=/usr/bin/gcc && export CXX=/usr/bin/g++ && conda activate protenix311 && python -u runner/train.py \
   --model_name protenix_mini_esm650m_unimol_contrast_v0.2.0 \
   --run_name debug_qbiolip_single2 \
@@ -145,3 +145,37 @@ export CC=/usr/bin/gcc && export CXX=/usr/bin/g++ && conda activate protenix311 
   --use_wandb False \
   --project debug_qbiolip \
   --data.train_sets qbiolip_nonredund
+
+  ### q1 存在ligand不识别的问题?
+1.   根据qbiolip 下载select ligand的黑名单
+2.   python3 /home/dataset-local/tmp/zsl/Protenix/scripts/gen_ccd_cache.py -n 32 下载ccd数据
+```bash
+CCD_COMPONENTS_FILE_PATH = os.path.join(DATA_ROOT_DIR, "ccd_cache","components.cif")
+CCD_COMPONENTS_RDKIT_MOL_FILE_PATH = os.path.join(
+    DATA_ROOT_DIR,"ccd_cache","components.cif.rdkit_mol.pkl"
+)
+```
+3. 为了避免DDP过程中出现ligand=0的情况会导致NCCL Hang，需要对过程进行补充(解决方法：对缺少的部分进行补充，让他们ligand=0的部分也要进行同样的处理流程，但是loss不做贡献)
+
+### qbiolip（四卡）
+cd /home/dataset-local/tmp/zsl/Protenix && \
+export CC=/usr/bin/gcc CXX=/usr/bin/g++ && \
+source ~/.bashrc 2>/dev/null || true && \
+conda activate protenix311 && \
+export NCCL_ASYNC_ERROR_HANDLING=1 NCCL_DEBUG=warn NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1 && \
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 runner/train.py \
+  --model_name protenix_mini_esm650m_unimol_contrast_v0.2.0 \
+  --run_name debug_qbiolip_ddp4 \
+  --base_dir ./output \
+  --model.N_cycle 1 \
+  --sample_diffusion.N_sample 1 \
+  --max_steps 2 \
+  --log_interval 1 \
+  --eval_interval 999999999 \
+  --checkpoint_interval 999999999 \
+  --use_wandb False \
+  --project debug_qbiolip \
+  --data.train_sets qbiolip_nonredund
+#### q2 不同的rank走了不同的分支，有的有ligand 有的没有，导致某些需要同步梯度的参数在部分rank上变成了unused 从而梯度上死锁超时
+find_unused_parameters: true
+static_graph=False,# 原本是true

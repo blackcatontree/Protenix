@@ -23,7 +23,10 @@ from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
-import wandb
+try:
+    import wandb
+except Exception:
+    wandb = None
 from ml_collections.config_dict import ConfigDict
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
@@ -45,8 +48,6 @@ from protenix.config import parse_configs, parse_sys_args
 from protenix.config.config import save_config
 from protenix.data.dataloader import get_dataloaders
 from protenix.metrics.lddt_metrics import LDDTMetrics
-from protenix.model.loss import ProtenixLoss
-from protenix.model.protenix import Protenix
 from protenix.utils.distributed import DIST_WRAPPER
 from protenix.utils.lr_scheduler import FinetuneLRScheduler, get_lr_scheduler
 from protenix.utils.metrics import SimpleMetricAggregator
@@ -128,7 +129,10 @@ class AF3Trainer(object):
                 config=vars(self.configs),
                 id=self.configs.wandb_id or None,
             )
-        self.train_metric_wrapper = SimpleMetricAggregator(["avg"])
+        #self.train_metric_wrapper = SimpleMetricAggregator(["avg"])
+        # 改成：训练不做对象 gather（避免 all_gather_object 的 GPU OOM）
+        self.train_metric_wrapper = SimpleMetricAggregator(["avg"], need_gather=False)
+
 
     def init_env(self):
         """Init pytorch/cuda envs."""
@@ -174,6 +178,7 @@ class AF3Trainer(object):
         logging.info("Finished init ENV.")
 
     def init_loss(self):
+        from protenix.model.loss import ProtenixLoss
         self.loss = ProtenixLoss(self.configs)
         self.symmetric_permutation = SymmetricPermutation(
             self.configs, error_dir=self.error_dir
@@ -181,6 +186,7 @@ class AF3Trainer(object):
         self.lddt_metrics = LDDTMetrics(self.configs)
 
     def init_model(self):
+        from protenix.model.protenix import Protenix
         if 'distill_model_config' in self.configs:
             org_model_config = copy.deepcopy(self.configs.model)
             self.configs.model = self.configs.distill_model_config
@@ -247,18 +253,19 @@ class AF3Trainer(object):
             # Fix DDP/checkpoint https://discuss.pytorch.org/t/ddp-and-gradient-checkpointing/132244
             self.model = DDP(
                 self.raw_model,
-                find_unused_parameters=self.configs.find_unused_parameters,
+                find_unused_parameters=True,
                 device_ids=[DIST_WRAPPER.local_rank],
                 output_device=DIST_WRAPPER.local_rank,
-                static_graph=False,
+                static_graph=False,# 原本是true
             )
             if 'distill_model_config' in self.configs:
                 self.distill_model = DDP(
                     self.raw_distill_model,
-                    find_unused_parameters=self.configs.find_unused_parameters,
+                    #find_unused_parameters=self.configs.find_unused_parameters,
+                    find_unused_parameters=True,
                     device_ids=[DIST_WRAPPER.local_rank],
                     output_device=DIST_WRAPPER.local_rank,
-                    static_graph=False,
+                    static_graph=False,# 原本是true
                 )
         else:
             self.model = self.raw_model
