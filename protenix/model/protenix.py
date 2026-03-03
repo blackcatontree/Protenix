@@ -229,6 +229,11 @@ class Protenix(nn.Module):
         
         
         self.distill_mode = configs.get('distill_mode', 0) # 0 forbidden distill; 1 means teacher; 2 means student;
+        self._enable_forward_debug_log = bool(
+            getattr(self.configs, "debug", False)
+            or getattr(self.configs, "verbose", False)
+            or getattr(self.configs, "debug_forward", False)
+        )
 
         # Zero init the recycling layer
         nn.init.zeros_(self.linear_no_bias_z_cycle.weight)
@@ -260,11 +265,18 @@ class Protenix(nn.Module):
         if self.esm_dim is None or self.unimol_dim is None:
             self.esm_proj = None
             self.unimol_proj = None
+            self.esm_proj_to_s_inputs = None
+            self.unimol_proj_to_s_inputs = None
         else:
             #self.esm_proj = nn.Linear(self.esm_dim, self.contrast_dim, bias=False)
             #self.unimol_proj = nn.Linear(self.unimol_dim, self.contrast_dim, bias=False)
             self.esm_proj = _mlp(self.esm_dim, self.contrast_dim)
             self.unimol_proj = _mlp(self.unimol_dim, self.contrast_dim)
+            # Reuse the same MLP embeddings for the structure branch by mapping to s_inputs dim.
+            self.esm_proj_to_s_inputs = LinearNoBias(self.contrast_dim, self.c_s_inputs)
+            self.unimol_proj_to_s_inputs = LinearNoBias(
+                self.contrast_dim, self.c_s_inputs
+            )
 
     def get_pairformer_output(
         self,
@@ -299,6 +311,15 @@ class Protenix(nn.Module):
         # 加入 UniMol 条件（token 级对齐后）
         if self.use_unimol and ("unimol_s_inputs_add" in input_feature_dict):
             s_inputs = s_inputs + input_feature_dict["unimol_s_inputs_add"].to(
+                device=s_inputs.device, dtype=s_inputs.dtype
+            )
+        # Add MLP-projected ESM/UniMol token features to the structure trunk when provided.
+        if "esm_s_inputs_add_mlp" in input_feature_dict:
+            s_inputs = s_inputs + input_feature_dict["esm_s_inputs_add_mlp"].to(
+                device=s_inputs.device, dtype=s_inputs.dtype
+            )
+        if "unimol_s_inputs_add_mlp" in input_feature_dict:
+            s_inputs = s_inputs + input_feature_dict["unimol_s_inputs_add_mlp"].to(
                 device=s_inputs.device, dtype=s_inputs.dtype
             )
         z_constraint = None
@@ -406,13 +427,14 @@ class Protenix(nn.Module):
             self.template_embedder.train()
             self.msa_module.train()
             self.pairformer_stack.train()
-        print("pairformer output 运行中!")
-        print("s_inputs", s_inputs.shape)
+        if self._enable_forward_debug_log and DIST_WRAPPER.rank == 0:
+            print("pairformer output 运行中!")
+            print("s_inputs", s_inputs.shape)
         return s_inputs, s, z
 
     # pool_esm_embedding
     @staticmethod
-    def _pool_esm_global(esm_embeddings):
+    def _pool_esm_global(esm_embeddings, debug=False):
         if esm_embeddings is None:
             return None
         total = None #D
@@ -426,10 +448,35 @@ class Protenix(nn.Module):
             n += v.size(0)
         # 解决esm没有蛋白质时的崩溃
         if total is None or n ==0:
-            print("没有esm的信息，回退到0")
+            if debug:
+                print("没有esm的信息，回退到0")
             return None
 
         return total/n
+
+    @staticmethod
+    def _build_esm_token_embedding(
+        input_feature_dict: dict[str, Any], embedding_dim: int, device: torch.device
+    ) -> Optional[torch.Tensor]:
+        if (
+            "esm_embeddings" not in input_feature_dict
+            or "esm_token_map_idx" not in input_feature_dict
+        ):
+            return None
+        token_map = input_feature_dict["esm_token_map_idx"]
+        n_token = int(input_feature_dict["token_index"].shape[-1])
+        token_emb = torch.zeros(
+            size=(n_token, embedding_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+        for i in range(n_token):
+            if token_map[i][0] < 0:
+                continue
+            token_emb[i] = input_feature_dict["esm_embeddings"][
+                str(int(token_map[i][1]))
+            ][int(token_map[i][0])]
+        return token_emb
     
     def sample_diffusion(self, **kwargs) -> torch.Tensor:
         """
@@ -955,6 +1002,14 @@ class Protenix(nn.Module):
             )
             input_feature_dict['esm_embeddings'] = esm_embeddings
             # print(esm_embeddings.shape)
+            if self.esm_dim is not None:
+                esm_token_embedding = self._build_esm_token_embedding(
+                    input_feature_dict=input_feature_dict,
+                    embedding_dim=int(self.esm_dim),
+                    device=next(self.parameters()).device,
+                )
+                if esm_token_embedding is not None:
+                    input_feature_dict["esm_token_embedding"] = esm_token_embedding
         
         if self.use_unimol:           
             # get the ligand atom and positions
@@ -1059,22 +1114,24 @@ class Protenix(nn.Module):
                 input_feature_dict["unimol_token_embeddings"] = unimol_token # N_token,D 结构生成
                 input_feature_dict["unimol_s_inputs_add"] = self.unimol_to_s_inputs(unimol_token) # [N_token,c_s_inputs]
 
-                print("unimol 完成了！")
-                print("valid_len", valid_len, "n_atoms_u", n_atoms_u, "n_ligand", n_ligand, "n_take", n_take)
-                print("is_ligand_sum", input_feature_dict.get("is_ligand", None).sum() if input_feature_dict.get("is_ligand", None) is not None else None)
-                print("unimol_token_embeddings", input_feature_dict["unimol_token_embeddings"].shape)
-                print("unimol_s_inputs_add", input_feature_dict["unimol_s_inputs_add"].shape)
+                if self._enable_forward_debug_log and DIST_WRAPPER.rank == 0:
+                    print("unimol 完成了！")
+                    print("valid_len", valid_len, "n_atoms_u", n_atoms_u, "n_ligand", n_ligand, "n_take", n_take)
+                    print("is_ligand_sum", input_feature_dict.get("is_ligand", None).sum() if input_feature_dict.get("is_ligand", None) is not None else None)
+                    print("unimol_token_embeddings", input_feature_dict["unimol_token_embeddings"].shape)
+                    print("unimol_s_inputs_add", input_feature_dict["unimol_s_inputs_add"].shape)
                 #unimol_embeddings = out[0]  # [N_ligand_atoms, unimol_dim]
                 #input_feature_dict['unimol_embeddings'] = unimol_embeddings
             else:
-                print("缺少ligand！全部填写为0！")
-                print("DEBUG: input_feature_dict keys:", list(input_feature_dict.keys()))
-                print("DEBUG: is_ligand present?", "is_ligand" in input_feature_dict)
-                if "is_ligand" in input_feature_dict:
-                    try:
-                        print("DEBUG: is_ligand sum", input_feature_dict["is_ligand"].sum().item())
-                    except Exception:
-                        pass
+                if self._enable_forward_debug_log and DIST_WRAPPER.rank == 0:
+                    print("缺少ligand！全部填写为0！")
+                    print("DEBUG: input_feature_dict keys:", list(input_feature_dict.keys()))
+                    print("DEBUG: is_ligand present?", "is_ligand" in input_feature_dict)
+                    if "is_ligand" in input_feature_dict:
+                        try:
+                            print("DEBUG: is_ligand sum", input_feature_dict["is_ligand"].sum().item())
+                        except Exception:
+                            pass
                 N_token = int(input_feature_dict["token_index"].shape[-1])
                 unimol_device = next(self.unimol_model.parameters()).device
                 D_unimol = int(self.unimol_dim)
@@ -1098,7 +1155,10 @@ class Protenix(nn.Module):
                 lig_global = input_feature_dict["unimol_global_embedding"].to(device=unimol_device)   # [512] 或 [B,512]
                 prot_global_raw = input_feature_dict.get("esm_embeddings", None)
                 
-                prot_global = self._pool_esm_global(prot_global_raw)
+                prot_global = self._pool_esm_global(
+                    prot_global_raw,
+                    debug=self._enable_forward_debug_log and DIST_WRAPPER.rank == 0,
+                )
                 # if esm embeddings missing, fallback to zero vector to avoid crash
                 if prot_global is None:
                     esm_dim = getattr(self, "esm_dim", None) or 1280
@@ -1135,6 +1195,33 @@ class Protenix(nn.Module):
         contrast_enable = bool(contrast_cfg.get("enable", False))
         contrast_out = {}
 
+        # Structure branch uses the same ESM/UniMol MLP embeddings when available.
+        if (self.esm_proj is not None) and (self.unimol_proj is not None):
+            if (
+                "esm_token_embedding" in input_feature_dict
+                and self.esm_proj_to_s_inputs is not None
+            ):
+                esm_token_z = self.esm_proj(
+                    input_feature_dict["esm_token_embedding"].to(
+                        device=unimol_device, dtype=torch.float32
+                    )
+                )
+                input_feature_dict["esm_s_inputs_add_mlp"] = self.esm_proj_to_s_inputs(
+                    esm_token_z
+                )
+            if (
+                "unimol_token_embeddings" in input_feature_dict
+                and self.unimol_proj_to_s_inputs is not None
+            ):
+                unimol_token_z = self.unimol_proj(
+                    input_feature_dict["unimol_token_embeddings"].to(
+                        device=unimol_device, dtype=torch.float32
+                    )
+                )
+                input_feature_dict["unimol_s_inputs_add_mlp"] = (
+                    self.unimol_proj_to_s_inputs(unimol_token_z)
+                )
+
         if contrast_enable and (self.esm_proj is not None) and (self.unimol_proj is not None):
             # 是否真的有 ligand（用于 mask，不用于控制是否计算）
             has_ligand = (input_feature_dict["is_ligand"].sum() > 0).item()
@@ -1142,7 +1229,10 @@ class Protenix(nn.Module):
             # --- always build embeddings on every rank ---
             lig_global = input_feature_dict["unimol_global_embedding"].to(device=unimol_device)  # [D_unimol]
             prot_global_raw = input_feature_dict.get("esm_embeddings", None)
-            prot_global = self._pool_esm_global(prot_global_raw)
+            prot_global = self._pool_esm_global(
+                prot_global_raw,
+                debug=self._enable_forward_debug_log and DIST_WRAPPER.rank == 0,
+            )
 
             if prot_global is None:
                 esm_dim = getattr(self, "esm_dim", None) or 1280
@@ -1163,17 +1253,13 @@ class Protenix(nn.Module):
             #     "contrast_logit_scale": self.logit_scale,   # IMPORTANT: use the PARAMETER here
             #     "contrast_valid_mask": valid,
             # }
-            scale = self.logit_scale.exp()  # non-leaf tensor，有 grad_fn
             contrast_out = {
                 "contrast_prot_z": prot_z,
                 "contrast_lig_z": lig_z,
-                "contrast_logit_scale": scale,
-                # 如果你还想记录原始 log 值用于日志：
-                "contrast_logit_scale_log": self.logit_scale.detach(),
+                # Keep logit_scale trainable; ContrastiveCLIPLoss handles DDP-safe path.
+                "contrast_logit_scale": self.logit_scale,
                 "contrast_valid_mask": valid,
             }
-            print("logit_scale is_leaf:", self.logit_scale.is_leaf, "grad_fn:", self.logit_scale.grad_fn)
-            print("out_scale is_leaf:", scale.is_leaf, "grad_fn:", scale.grad_fn)
 
 
 

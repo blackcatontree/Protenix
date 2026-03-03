@@ -558,7 +558,7 @@ class BaseSingleDataset(Dataset):
                 token_centre_atom_indices
             ].chain_id
             is_ref_chain = np.isin(token_chain_id, ref_chain_ids)
-            bioassembly_dict["token_array"], bioassembly_dict["atom_array"], _, _ = (
+            bioassembly_dict["token_array"], bioassembly_dict["atom_array"], _, _,*rest = (
                 CropData.select_by_token_indices(
                     token_array=bioassembly_dict["token_array"],
                     atom_array=bioassembly_dict["atom_array"],
@@ -567,12 +567,14 @@ class BaseSingleDataset(Dataset):
             )
 
         if self.shuffle_mols:
-            bioassembly_dict["token_array"], bioassembly_dict["atom_array"] = (
+            bioassembly_dict["token_array"], bioassembly_dict["atom_array"],*rest = (
                 self._shuffle_array_based_on_mol_id(
                     token_array=bioassembly_dict["token_array"],
                     atom_array=bioassembly_dict["atom_array"],
                 )
             )
+            if dist.is_available() and dist.is_initialized() and dist.get_rank() == 0:
+                print("[DEBUG] extra returns:", len(rest), "types:", [type(x) for x in rest])
 
         if self.shuffle_sym_ids:
             bioassembly_dict["atom_array"] = self._assign_random_sym_id(

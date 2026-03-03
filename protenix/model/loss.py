@@ -1534,8 +1534,8 @@ class ContrastiveCLIPLoss(nn.Module):
         valid_all, _ = self._gather_global_nograd(valid_mask[:, None])
         valid_all = valid_all.squeeze(-1)  # [world]
 
-        # !!! CRITICAL FIX: detach logit_scale to avoid DDP "marked ready twice"
-        scale = logit_scale.detach().float().exp().clamp(max=self.max_scale)
+        # !!! CRITICAL FIX: keep logit_scale trainable here, and only detach in gather path.
+        scale = logit_scale.float().exp().clamp(max=self.max_scale)
 
         logits_p = (scale * (prot_z @ lig_all.t())).float()   # [1, world]
         logits_l = (scale * (lig_z  @ prot_all.t())).float()  # [1, world]
@@ -1616,6 +1616,11 @@ class ProtenixLoss(nn.Module):
         if self.contrast_enable:
             self.contrast_loss = ContrastiveCLIPLoss(max_scale=100.0)
             self.loss_weight["contrast_loss"] = float(configs.contrast.loss_weight)
+            self.contrast_loss_weight_warmup_steps = int(
+                getattr(configs.contrast, "loss_weight_warmup_steps", 0)
+            )
+        else:
+            self.contrast_loss_weight_warmup_steps = 0
 
 
     def calculate_label(
@@ -1683,8 +1688,26 @@ class ProtenixLoss(nn.Module):
             )  # [..., N_atom, N_atom]
         return pred_dict
 
+    def _get_effective_loss_weight(
+        self, loss_name: str, feat_dict: dict[str, Any], mode: str
+    ) -> float:
+        weight = float(self.loss_weight[loss_name])
+        if (
+            loss_name == "contrast_loss"
+            and mode == "train"
+            and self.contrast_loss_weight_warmup_steps > 0
+        ):
+            current_step = int(feat_dict.get("current_step", 0))
+            warmup = min(1.0, (current_step + 1) / self.contrast_loss_weight_warmup_steps)
+            weight = weight * warmup
+        return weight
+
     def aggregate_losses(
-        self, loss_fns: dict, has_valid_resolution: Optional[torch.Tensor] = None
+        self,
+        loss_fns: dict,
+        feat_dict: dict[str, Any],
+        mode: str,
+        has_valid_resolution: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict]:
         """
         Aggregates multiple loss functions and their respective metrics.
@@ -1701,7 +1724,7 @@ class ProtenixLoss(nn.Module):
         cum_loss = 0.0
         all_metrics = {}
         for loss_name, loss_fn in loss_fns.items():
-            weight = self.loss_weight[loss_name]
+            weight = self._get_effective_loss_weight(loss_name, feat_dict, mode)
             loss_outputs = loss_fn()
             if isinstance(loss_outputs, tuple):
                 loss, metrics = loss_outputs
@@ -1727,6 +1750,9 @@ class ProtenixLoss(nn.Module):
                 all_metrics[loss_name] = loss.detach().clone()
                 print(f'weighted_{loss_name}: {weight * loss.item()}')
                 all_metrics[f"weighted_{loss_name}"] = weight * loss.detach().clone()
+                all_metrics[f"{loss_name}/weight"] = torch.tensor(
+                    weight, device=loss.device, dtype=loss.dtype
+                )
 
             cum_loss = cum_loss + weight * loss
         all_metrics["loss"] = cum_loss.detach().clone()
@@ -1751,10 +1777,17 @@ class ProtenixLoss(nn.Module):
 
         Returns:
             tuple[torch.Tensor, dict[str, torch.Tensor]]:
-                - cum_loss (torch.Tensor): Cumulative loss.
-                - metrics (dict[str, torch.Tensor]): Dictionary containing aggregated metrics.
+            - cum_loss (torch.Tensor): Cumulative loss.
+            - metrics (dict[str, torch.Tensor]): Dictionary containing aggregated metrics.
         """
         assert mode in ["train", "eval", "inference"]
+        contrast_missing: dict[str, int] = {
+            "contrast_prot_z": 0,
+            "contrast_lig_z": 0,
+            "contrast_logit_scale": 0,
+            "contrast_valid_mask": 0,
+        }
+
         if mode == "train":
             # Confidence Loss: use mini-rollout coordinates
             confidence_coordinate = "coordinate_mini"
@@ -1906,12 +1939,16 @@ class ProtenixLoss(nn.Module):
 
                 # Fill missing keys with dummy tensors
                 if "contrast_prot_z" not in pred_dict or not isinstance(pred_dict["contrast_prot_z"], torch.Tensor):
+                    contrast_missing["contrast_prot_z"] = 1
                     pred_dict["contrast_prot_z"] = torch.zeros((1, D), device=device, dtype=torch.float32)
                 if "contrast_lig_z" not in pred_dict or not isinstance(pred_dict["contrast_lig_z"], torch.Tensor):
+                    contrast_missing["contrast_lig_z"] = 1
                     pred_dict["contrast_lig_z"] = torch.zeros((1, D), device=device, dtype=torch.float32)
                 if "contrast_logit_scale" not in pred_dict or not isinstance(pred_dict["contrast_logit_scale"], torch.Tensor):
+                    contrast_missing["contrast_logit_scale"] = 1
                     pred_dict["contrast_logit_scale"] = torch.zeros((), device=device, dtype=torch.float32)
                 if "contrast_valid_mask" not in pred_dict or not isinstance(pred_dict["contrast_valid_mask"], torch.Tensor):
+                    contrast_missing["contrast_valid_mask"] = 1
                     pred_dict["contrast_valid_mask"] = torch.zeros((1,), device=device, dtype=torch.float32)
 
                 # --- CRITICAL: enforce B=1 for all ranks to keep NCCL shapes identical ---
@@ -2006,7 +2043,39 @@ class ProtenixLoss(nn.Module):
                 }
             )
 
-        cum_loss, metrics = self.aggregate_losses(loss_fns, has_valid_resolution)
+        cum_loss, metrics = self.aggregate_losses(
+            loss_fns=loss_fns,
+            feat_dict=feat_dict,
+            mode=mode,
+            has_valid_resolution=has_valid_resolution,
+        )
+
+        if (mode == "train") and self.contrast_enable:
+            metric_device = (
+                cum_loss.device if torch.is_tensor(cum_loss) else torch.device("cpu")
+            )
+            total_missing = (
+                contrast_missing["contrast_prot_z"]
+                + contrast_missing["contrast_lig_z"]
+                + contrast_missing["contrast_logit_scale"]
+                + contrast_missing["contrast_valid_mask"]
+            )
+            metrics["contrast_loss/missing_input_total"] = torch.tensor(
+                float(total_missing), device=metric_device, dtype=torch.float32
+            )
+            metrics["contrast_loss/missing_input_prot_z"] = torch.tensor(
+                float(contrast_missing["contrast_prot_z"]), device=metric_device, dtype=torch.float32
+            )
+            metrics["contrast_loss/missing_input_lig_z"] = torch.tensor(
+                float(contrast_missing["contrast_lig_z"]), device=metric_device, dtype=torch.float32
+            )
+            metrics["contrast_loss/missing_input_logit_scale"] = torch.tensor(
+                float(contrast_missing["contrast_logit_scale"]), device=metric_device, dtype=torch.float32
+            )
+            metrics["contrast_loss/missing_input_valid_mask"] = torch.tensor(
+                float(contrast_missing["contrast_valid_mask"]), device=metric_device, dtype=torch.float32
+            )
+
         return cum_loss, metrics
 
     def forward(

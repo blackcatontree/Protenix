@@ -607,9 +607,10 @@ model_configs = {
         "contrast":{
             "enable":True,
             "contrast_dim": 256,
-            "loss_weight": 1.0,
+            "loss_weight": 0.2,
+            "loss_weight_warmup_steps": 2000,
             # If true, freeze backbone (protenix, esm, unimol) and only train projection MLP and logit_scale
-            "train_projection_only": True,
+            "train_projection_only": False,
 
         },
         "load_strict": False,  # For inference, it should be True.
@@ -663,5 +664,95 @@ model_configs = {
         "load_strict": False,  # For inference, it should be True.
         "use_msa": False,  # For efficiency, this model does not use MSA by default.
         
+    },
+    # v2.2 contrast stabilized defaults (joint optimization + contrast warmup)
+    "protenix_mini_esm650m_unimol_contrast_v0.2.2":{
+        "model":{
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2_t33_650M_UR50D",
+            "esm_trainable": False,
+            "embedding_dim": 1280,
+            "local_model_path": '/home/dataset-local/tmp/zsl/Protenix/weight/',
+            "truncation_seq_length": 1024,
+        },
+        "unimol": {
+            "mode": "train",
+            "dict_path": "/home/dataset-local/tmp/zsl/Protenix/protenix/model/unimol/data",
+            "pretrained_path": "/home/dataset-local/tmp/zsl/Protenix/weight/mol_pre_no_h_220816.pt",
+            "unimol_trainable":False,
+        },
+        "contrast":{
+            "enable":True,
+            "contrast_dim": 256,
+            "loss_weight": 0.2,
+            "loss_weight_warmup_steps": 2000,
+            "train_projection_only": False,
+        },
+        "load_strict": False,
+        "use_msa": False,
+    },
+    # structure-only sanity check (no contrast loss, just Protenix structure loss)
+    "protenix_mini_structure_only_v0.1.0": {
+        "model": {
+            "N_cycle": 4,
+            "msa_module": {
+                "n_blocks": 1,
+            },
+            "pairformer": {
+                "n_blocks": 16,
+            },
+            "diffusion_module": {
+                "atom_encoder": {
+                    "n_blocks": 1,
+                },
+                "transformer": {
+                    "n_blocks": 8,
+                },
+                "atom_decoder": {
+                    "n_blocks": 1,
+                },
+            },
+        },
+        "esm": {
+            "esm_model_online": True,
+            "enable": True,
+            "model_name": "esm2_t33_650M_UR50D",
+            "esm_trainable": False,
+            "embedding_dim": 1280,
+            "local_model_path": "/home/dataset-local/tmp/zsl/Protenix/weight/",
+            "truncation_seq_length": 1024,
+        },
+        "unimol": {
+            "mode": "train",
+            "dict_path": "/home/dataset-local/tmp/zsl/Protenix/protenix/model/unimol/data",
+            "pretrained_path": "/home/dataset-local/tmp/zsl/Protenix/weight/mol_pre_no_h_220816.pt",
+            "unimol_trainable": False,
+        },
+        "contrast": {
+            "enable": False,
+        },
+        "load_strict": False,
+        "use_msa": False,
     }
 }

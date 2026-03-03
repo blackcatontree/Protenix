@@ -594,6 +594,7 @@ class AF3Trainer(object):
         self, batch: dict, mode: str = "train"
     ) -> tuple[torch.Tensor, dict, dict]:
         assert mode in ["train", "eval"]
+        batch["input_feature_dict"]["current_step"] = int(self.step)
 
         loss, loss_dict = autocasting_disable_decorator(self.configs.skip_amp.loss)(
             self.loss
@@ -706,7 +707,20 @@ class AF3Trainer(object):
                     simple_metric_wrapper.add(
                         f"{ema_suffix}{key}", value, namespace=test_name
                     )
-
+                # 调试wandb
+                if self.configs.use_wandb and DIST_WRAPPER.rank == 0:
+                    eval_log_interval = getattr(self.configs, "eval_log_interval", 5)  # 每5个batch打一条
+                    if (index % eval_log_interval == 0) or (index + 1 == total_batch_num):
+                        wandb.log(
+                            {
+                                f"eval/{test_name}/progress": (index + 1) / total_batch_num,
+                                f"eval/{test_name}/batch_idx": index + 1,
+                                # 用本 batch 的 loss（或者你也可以换成某个 loss_dict 里的 key）
+                                f"eval/{test_name}/loss_batch": float(loss.detach().float().cpu()),
+                            },
+                            step=self.step,  # 关键：保持 step 不倒退
+                        )
+                # 调试结束
                 del batch, simple_metrics
                 if index % 5 == 0:
                     # Release some memory periodically
@@ -762,6 +776,21 @@ class AF3Trainer(object):
 
         with enable_amp:
             batch, _ = self.model_forward(batch, mode="train")
+            # 调试信息
+            if DIST_WRAPPER.rank == 0 and self.step < 50:
+                try:
+                    is_lig_sum = int(batch["input_feature_dict"]["is_ligand"].sum().item())
+                    if is_lig_sum == 0:
+                        b = batch.get("basic", {})
+                        print(
+                            f"[NO_LIGAND][step={self.step}] pdb_id={b.get('pdb_id')} assembly_id={b.get('assembly_id')} "
+                            f"chain_1_id={b.get('chain_1_id', None)} chain_2_id={b.get('chain_2_id', None)} "
+                            f"asym_id_unique={batch['input_feature_dict']['asym_id'].unique().tolist()[:20]} "
+                            f"num_tokens={b.get('num_tokens', None)}"
+                        )
+                except Exception as e:
+                    print("[NO_LIGAND] debug print failed:", e)
+            # 调试结束
             loss, loss_dict, _ = self.get_loss(batch, mode="train")
 
         if self.configs.dtype in ["bf16", "fp32"]:
