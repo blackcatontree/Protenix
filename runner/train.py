@@ -23,6 +23,7 @@ from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 try:
     import wandb
 except Exception:
@@ -205,8 +206,10 @@ class AF3Trainer(object):
         contrast_cfg = getattr(self.configs, "contrast", {})
         if isinstance(contrast_cfg, dict):
             train_proj_only = contrast_cfg.get("train_projection_only", False)
+            contrast_only_forward = contrast_cfg.get("only_forward", False)
         else:
             train_proj_only = getattr(contrast_cfg, "get", lambda k, d: d)("train_projection_only", False)
+            contrast_only_forward = getattr(contrast_cfg, "get", lambda k, d: d)("only_forward", False)
 
         if train_proj_only:
             # 1. freeze all params
@@ -214,23 +217,51 @@ class AF3Trainer(object):
                 p.requires_grad = False
 
             # 2. unfreeze projection layers if they exist
+            # NOTE:
+            # - structure projection heads: esm_proj / unimol_proj
+            # - contrast projection heads: esm_contrast_proj / unimol_contrast_proj
+            # - mapping to structure branch: *_proj_to_s_inputs
+            # Keep a deduplicated module list by id, because separate_projection_head=False
+            # may alias contrast heads to structure heads.
+            if contrast_only_forward:
+                module_names = [
+                    "esm_contrast_proj",
+                    "unimol_contrast_proj",
+                ]
+            else:
+                module_names = [
+                    "esm_proj",
+                    "unimol_proj",
+                    "esm_contrast_proj",
+                    "unimol_contrast_proj",
+                    "esm_proj_to_s_inputs",
+                    "unimol_proj_to_s_inputs",
+                ]
             unfreeze_modules = []
-            if getattr(self.raw_model, "esm_proj", None) is not None:
-                unfreeze_modules.append(self.raw_model.esm_proj)
-            if getattr(self.raw_model, "unimol_proj", None) is not None:
-                unfreeze_modules.append(self.raw_model.unimol_proj)
-            # also unfreeze logit scale
-            if getattr(self.raw_model, "logit_scale", None) is not None:
+            _seen_module_ids = set()
+            for module_name in module_names:
+                module = getattr(self.raw_model, module_name, None)
+                if module is None:
+                    continue
+                mid = id(module)
+                if mid in _seen_module_ids:
+                    continue
+                _seen_module_ids.add(mid)
+                unfreeze_modules.append((module_name, module))
+
+            # also unfreeze logit scale only when it is a Parameter
+            if isinstance(getattr(self.raw_model, "logit_scale", None), torch.nn.Parameter):
                 self.raw_model.logit_scale.requires_grad = True
 
-            for m in unfreeze_modules:
+            for _, m in unfreeze_modules:
                 for p in m.parameters():
                     p.requires_grad = True
 
             # set appropriate train/eval modes: backbone eval, projection train
             self.raw_model.eval()
-            for m in unfreeze_modules:
+            for module_name, m in unfreeze_modules:
                 m.train()
+                self.print(f"[train_projection_only] unfreeze module: {module_name}")
 
         self.only_diffusion_module_train = self.configs.model.only_diffusion_module_train
         if self.only_diffusion_module_train:
@@ -251,21 +282,21 @@ class AF3Trainer(object):
             self.print(f"Using DDP")
             self.use_ddp = True
             # Fix DDP/checkpoint https://discuss.pytorch.org/t/ddp-and-gradient-checkpointing/132244
+            find_unused = bool(getattr(self.configs, "find_unused_parameters", False))
             self.model = DDP(
                 self.raw_model,
-                find_unused_parameters=True,
+                find_unused_parameters=find_unused,
                 device_ids=[DIST_WRAPPER.local_rank],
                 output_device=DIST_WRAPPER.local_rank,
-                static_graph=False,# 原本是true
+                static_graph=(not find_unused),
             )
             if 'distill_model_config' in self.configs:
                 self.distill_model = DDP(
                     self.raw_distill_model,
-                    #find_unused_parameters=self.configs.find_unused_parameters,
-                    find_unused_parameters=True,
+                    find_unused_parameters=find_unused,
                     device_ids=[DIST_WRAPPER.local_rank],
                     output_device=DIST_WRAPPER.local_rank,
-                    static_graph=False,# 原本是true
+                    static_graph=(not find_unused),
                 )
         else:
             self.model = self.raw_model
@@ -519,10 +550,18 @@ class AF3Trainer(object):
 
     def model_forward(self, batch: dict, mode: str = "train") -> tuple[dict, dict]:
         assert mode in ["train", "eval"]
-        
+
+        def _unpack_model_out(model_out):
+            if isinstance(model_out, tuple) and len(model_out) == 3:
+                return model_out
+            if isinstance(model_out, dict):
+                # contrast-only-forward path returns only pred_dict
+                return model_out, batch["label_dict"], {}
+            raise ValueError(f"Unexpected model output type: {type(model_out)}")
+
         if mode == 'train' and self.distill_mode:
             try:
-                batch['label_dict'] = self.model(
+                teacher_out = self.model(
                     input_feature_dict=batch["input_feature_dict"],
                     label_dict=batch["label_dict"],
                     label_full_dict=batch["label_full_dict"],
@@ -530,6 +569,21 @@ class AF3Trainer(object):
                     current_step=self.step if mode == "train" else None,
                     symmetric_permutation=self.symmetric_permutation,
                 ) # teacher return the mimic label
+                if isinstance(teacher_out, dict):
+                    batch["label_dict"] = teacher_out
+                elif isinstance(teacher_out, tuple):
+                    if len(teacher_out) >= 2 and isinstance(teacher_out[1], dict):
+                        batch["label_dict"] = teacher_out[1]
+                    elif len(teacher_out) >= 1 and isinstance(teacher_out[0], dict):
+                        batch["label_dict"] = teacher_out[0]
+                    else:
+                        raise ValueError(
+                            f"Unexpected teacher output tuple for distill train: {type(teacher_out)}"
+                        )
+                else:
+                    raise ValueError(
+                        f"Unexpected teacher output type for distill train: {type(teacher_out)}"
+                    )
                 batch["pred_dict"], _, log_dict = self.distill_model(
                     input_feature_dict=batch["input_feature_dict"],
                     label_dict=batch["label_dict"],
@@ -568,7 +622,7 @@ class AF3Trainer(object):
             batch['input_feature_dict']['s'] = batch['pred_dict']['s'].detach()
             batch['input_feature_dict']['z'] = batch['pred_dict']['z'].detach()
             
-            batch["pred_dict"], batch["label_dict"], log_dict = self.model(
+            model_out = self.model(
                 input_feature_dict=batch["input_feature_dict"],
                 label_dict=batch["label_dict"],
                 label_full_dict=batch["label_full_dict"],
@@ -576,11 +630,12 @@ class AF3Trainer(object):
                 current_step=self.step if mode == "train" else None,
                 symmetric_permutation=self.symmetric_permutation,
             ) # get the z, s, etc. from student model
+            batch["pred_dict"], batch["label_dict"], log_dict = _unpack_model_out(model_out)
             
             
         else: # eval model
             # self.symmetric_permutation = None
-            batch["pred_dict"], batch["label_dict"], log_dict = self.model(
+            model_out = self.model(
                 input_feature_dict=batch["input_feature_dict"],
                 label_dict=batch["label_dict"],
                 label_full_dict=batch["label_full_dict"],
@@ -588,6 +643,7 @@ class AF3Trainer(object):
                 current_step=self.step if mode == "train" else None,
                 symmetric_permutation=self.symmetric_permutation,
             )
+            batch["pred_dict"], batch["label_dict"], log_dict = _unpack_model_out(model_out)
         return batch, log_dict
 
     def get_loss(
@@ -605,6 +661,422 @@ class AF3Trainer(object):
             mode=mode,
         )
         return loss, loss_dict, batch
+
+    def _merge_loss_dicts_mean(self, loss_dicts: list[dict]) -> dict:
+        if len(loss_dicts) == 1:
+            return loss_dicts[0]
+        merged = {}
+        all_keys = set()
+        for d in loss_dicts:
+            all_keys.update(d.keys())
+        for k in all_keys:
+            vals = []
+            device = None
+            for d in loss_dicts:
+                if k not in d:
+                    continue
+                v = d[k]
+                if torch.is_tensor(v):
+                    if device is None:
+                        device = v.device
+                    vals.append(v.detach().float())
+                else:
+                    if device is None:
+                        device = self.device
+                    vals.append(torch.tensor(float(v), device=device, dtype=torch.float32))
+            if len(vals) == 0:
+                continue
+            vals = [x.to(device=device, dtype=torch.float32) for x in vals]
+            merged[k] = torch.stack(vals).mean()
+        return merged
+
+    def _compute_group_contrast_loss(self, batch_list: list[dict]) -> tuple[torch.Tensor, dict]:
+        device = self.device
+        D = 256
+        for b in batch_list:
+            pred = b.get("pred_dict", {})
+            for kk in ["contrast_prot_z", "contrast_lig_z"]:
+                if kk in pred and isinstance(pred[kk], torch.Tensor) and pred[kk].dim() >= 1:
+                    D = int(pred[kk].shape[-1])
+                    device = pred[kk].device
+                    break
+
+        def _to_scalar_text(value):
+            try:
+                if torch.is_tensor(value):
+                    if value.numel() == 0:
+                        return None
+                    value = value.reshape(-1)[0].item()
+                elif isinstance(value, (list, tuple)):
+                    if len(value) == 0:
+                        return None
+                    value = value[0]
+                value = str(value)
+            except Exception:
+                return None
+            value = value.strip()
+            return value if value else None
+
+        def _extract_pair_id(sample: dict, idx: int) -> tuple[str, bool]:
+            """Best-effort sample id extraction for alignment diagnostics."""
+            candidate_dicts = []
+            if isinstance(sample, dict):
+                candidate_dicts.extend(
+                    [
+                        sample.get("basic", {}),
+                        sample.get("input_feature_dict", {}),
+                        sample.get("label_dict", {}),
+                        sample.get("label_full_dict", {}),
+                        sample,
+                    ]
+                )
+            for src in candidate_dicts:
+                if not isinstance(src, dict):
+                    continue
+                for key in (
+                    "pair_id",
+                    "sample_id",
+                    "data_id",
+                    "uid",
+                    "id",
+                    "name",
+                    "pdb_id",
+                    "assembly_id",
+                    "chain_1_id",
+                    "chain_2_id",
+                    "ligand_id",
+                ):
+                    if key not in src:
+                        continue
+                    value = src[key]
+                    value = _to_scalar_text(value)
+                    if value is None:
+                        continue
+                    if value:
+                        return value, False
+            # Compose a stable id from nested "basic" metadata when direct keys are absent.
+            try:
+                b = sample.get("basic", {}) if isinstance(sample, dict) else {}
+                if isinstance(b, dict):
+                    pid = str(b.get("pdb_id", "")).strip()
+                    aid = str(b.get("assembly_id", "")).strip()
+                    c1 = str(b.get("chain_1_id", "")).strip()
+                    c2 = str(b.get("chain_2_id", "")).strip()
+                    lid = str(b.get("ligand_id", "")).strip()
+                    comp = [x for x in [pid, aid, c1, c2, lid] if x]
+                    if len(comp) > 0:
+                        return "|".join(comp), False
+            except Exception:
+                pass
+            return f"fallback_idx_{idx}", True
+
+        def _stable_uid_hash(text: str, salt: str) -> int:
+            digest = hashlib.blake2b(
+                f"{salt}|{text}".encode("utf-8"), digest_size=8
+            ).digest()
+            return int.from_bytes(digest, byteorder="big", signed=False) & ((1 << 63) - 1)
+
+        def _extract_uid(
+            sample: dict,
+            idx: int,
+            uid_type: str,
+            pair_id: str,
+            lig_z_hint: torch.Tensor | None = None,
+        ) -> tuple[int, bool]:
+            candidate_dicts = []
+            if isinstance(sample, dict):
+                candidate_dicts.extend(
+                    [
+                        sample.get("basic", {}),
+                        sample.get("input_feature_dict", {}),
+                        sample.get("label_dict", {}),
+                        sample.get("label_full_dict", {}),
+                        sample,
+                    ]
+                )
+
+            if uid_type == "prot":
+                keys = [
+                    "prot_uid",
+                    "protein_uid",
+                    "pocket_uid",
+                    "protein_id",
+                    "pdb_id",
+                    "bioassembly_dict_fpath",
+                    "chain_id",
+                    "entity_id",
+                ]
+            else:
+                keys = [
+                    "lig_uid",
+                    "ligand_uid",
+                    "ligand_id",
+                    "ligand_name",
+                    "entity_2_id",
+                    "smiles",
+                    "canonical_smiles",
+                    "inchi_key",
+                    "inchi",
+                    "ccd_id",
+                    "res_name",
+                ]
+
+            for src in candidate_dicts:
+                if not isinstance(src, dict):
+                    continue
+                for key in keys:
+                    if key not in src:
+                        continue
+                    value = _to_scalar_text(src[key])
+                    if value is None:
+                        continue
+                    return _stable_uid_hash(value, uid_type), False
+
+            if uid_type == "lig":
+                try:
+                    feat = sample.get("input_feature_dict", {}) if isinstance(sample, dict) else {}
+                    is_lig = feat.get("is_ligand", None)
+                    ref_element = feat.get("ref_element", None)
+                    if isinstance(is_lig, torch.Tensor) and isinstance(ref_element, torch.Tensor):
+                        is_lig = is_lig.view(-1) > 0
+                        ref_element = ref_element.view(-1).to(dtype=torch.long)
+                        if is_lig.numel() == ref_element.numel() and is_lig.any():
+                            lig_ele = ref_element[is_lig].clamp(min=0, max=255)
+                            hist = torch.bincount(lig_ele, minlength=256)
+                            nz = torch.nonzero(hist, as_tuple=False).view(-1)
+                            sig = ";".join([f"{int(i)}:{int(hist[i].item())}" for i in nz[:64]])
+                            if len(sig) > 0:
+                                return _stable_uid_hash(sig, "lig_sig"), False
+                except Exception:
+                    pass
+                try:
+                    if isinstance(lig_z_hint, torch.Tensor):
+                        zz = lig_z_hint.detach().float()
+                        if zz.dim() == 2 and zz.size(0) > 0:
+                            zz = zz.mean(dim=0)
+                        zz = zz.view(-1)
+                        if zz.numel() > 0:
+                            q = torch.round(zz[:128] * 100.0).to(dtype=torch.int32).tolist()
+                            sig = ",".join(str(int(x)) for x in q)
+                            if len(sig) > 0:
+                                return _stable_uid_hash(sig, "lig_emb"), False
+                except Exception:
+                    pass
+
+            fallback = f"{pair_id}|idx={idx}|{uid_type}"
+            return _stable_uid_hash(fallback, uid_type), True
+
+        def _to_row(x: torch.Tensor | None) -> torch.Tensor:
+            if not isinstance(x, torch.Tensor):
+                return torch.zeros((1, D), device=device, dtype=torch.float32)
+            if x.dim() == 1:
+                x = x.unsqueeze(0)
+            elif x.dim() > 2:
+                x = x.reshape(-1, x.shape[-1])
+            if x.dim() != 2:
+                x = torch.zeros((1, D), device=device, dtype=torch.float32)
+            if x.shape[-1] != D:
+                if x.shape[-1] > D:
+                    x = x[..., :D]
+                else:
+                    x = F.pad(x, (0, D - x.shape[-1]))
+            if x.shape[0] == 0:
+                x = torch.zeros((1, D), device=device, dtype=torch.float32)
+            # If multiple rows are present unexpectedly, use mean pooling instead of
+            # taking the first row to avoid index bias in contrast pairing.
+            return x.to(device=device, dtype=torch.float32).mean(dim=0, keepdim=True)
+
+        prot_rows = []
+        lig_rows = []
+        valid_rows = []
+        missing = {
+            "contrast_prot_z": 0.0,
+            "contrast_lig_z": 0.0,
+            "contrast_logit_scale": 0.0,
+            "contrast_valid_mask": 0.0,
+        }
+        pair_ids = []
+        pair_id_missing = 0.0
+        prot_uid_rows = []
+        lig_uid_rows = []
+        prot_uid_missing = 0.0
+        lig_uid_missing = 0.0
+        logit_scale = None
+
+        for i, b in enumerate(batch_list):
+            pred = b.get("pred_dict", {})
+
+            p = pred.get("contrast_prot_z", None)
+            l = pred.get("contrast_lig_z", None)
+            v = pred.get("contrast_valid_mask", None)
+            s = pred.get("contrast_logit_scale", None)
+            pair_id, is_missing = _extract_pair_id(b, i)
+            pair_ids.append(pair_id)
+            if is_missing:
+                pair_id_missing += 1.0
+            prot_uid, prot_miss = _extract_uid(b, i, "prot", pair_id)
+            lig_uid, lig_miss = _extract_uid(
+                b, i, "lig", pair_id, lig_z_hint=l if isinstance(l, torch.Tensor) else None
+            )
+            prot_uid_rows.append(prot_uid)
+            lig_uid_rows.append(lig_uid)
+            prot_uid_missing += float(prot_miss)
+            lig_uid_missing += float(lig_miss)
+
+            if not isinstance(p, torch.Tensor):
+                missing["contrast_prot_z"] += 1.0
+            if not isinstance(l, torch.Tensor):
+                missing["contrast_lig_z"] += 1.0
+            if not isinstance(v, torch.Tensor):
+                missing["contrast_valid_mask"] += 1.0
+            if not isinstance(s, torch.Tensor):
+                missing["contrast_logit_scale"] += 1.0
+
+            prot_rows.append(_to_row(p))
+            lig_rows.append(_to_row(l))
+
+            if isinstance(v, torch.Tensor):
+                vv = v.to(device=device, dtype=torch.float32).view(-1)
+                vv = vv[:1] if vv.numel() > 0 else torch.zeros((1,), device=device, dtype=torch.float32)
+            else:
+                vv = torch.zeros((1,), device=device, dtype=torch.float32)
+            valid_rows.append(vv)
+
+            if logit_scale is None and isinstance(s, torch.Tensor):
+                logit_scale = s.to(device=device, dtype=torch.float32)
+
+        if logit_scale is None:
+            logit_scale = torch.zeros((), device=device, dtype=torch.float32)
+
+        prot_z = torch.cat(prot_rows, dim=0)   # [B_local, D]
+        lig_z = torch.cat(lig_rows, dim=0)     # [B_local, D]
+        valid_mask = torch.cat(valid_rows, dim=0).view(-1)  # [B_local]
+        prot_uid = torch.tensor(prot_uid_rows, device=device, dtype=torch.long).view(-1)
+        lig_uid = torch.tensor(lig_uid_rows, device=device, dtype=torch.long).view(-1)
+
+        # Local pairing diagnostics (without DDP gather) to detect index mismatch.
+        with torch.no_grad():
+            p_local = F.normalize(prot_z, dim=-1)
+            l_local = F.normalize(lig_z, dim=-1)
+            sim_local = p_local @ l_local.t()  # [B_local, B_local]
+            b_local = sim_local.size(0)
+            labels_local = torch.arange(b_local, device=device, dtype=torch.long)
+            valid_local = (valid_mask > 0).to(sim_local.dtype)
+            denom_local = valid_local.sum().clamp(min=1.0)
+
+            top1_local = (sim_local.argmax(dim=-1) == labels_local).to(sim_local.dtype)
+            top1_local = (top1_local * valid_local).sum() / denom_local
+
+            pos_local = sim_local.gather(1, labels_local[:, None]).squeeze(-1)
+            if b_local > 1:
+                off_mask = ~torch.eye(b_local, device=device, dtype=torch.bool)
+                off_cnt = off_mask.sum(dim=-1).clamp(min=1).to(sim_local.dtype)
+                off_sum = sim_local.masked_fill(~off_mask, 0.0).sum(dim=-1)
+                off_local = off_sum / off_cnt
+            else:
+                off_local = torch.zeros_like(pos_local)
+            diag_minus_offdiag_local = (pos_local - off_local)
+            diag_minus_offdiag_local = (
+                diag_minus_offdiag_local * valid_local
+            ).sum() / denom_local
+
+        contrast_loss, contrast_metrics = self.loss.contrast_loss(
+            prot_z=prot_z,
+            lig_z=lig_z,
+            logit_scale=logit_scale,
+            valid_mask=valid_mask,
+            prot_uid=prot_uid,
+            lig_uid=lig_uid,
+        )
+        # Baseline-aware diagnostics:
+        # - raw_minus_ln_global_batch < 0 indicates better-than-random CE baseline.
+        # - top1_minus_random > 0 indicates better-than-random retrieval.
+        try:
+            gb = contrast_metrics.get("global_batch", None)
+            raw_v = contrast_metrics.get("raw", None)
+            top1_v = contrast_metrics.get("top1", None)
+            if isinstance(gb, torch.Tensor):
+                gb_safe = gb.detach().float().clamp(min=1.0)
+                rand_top1 = (1.0 / gb_safe).detach()
+                contrast_metrics["random_top1"] = rand_top1
+                if isinstance(raw_v, torch.Tensor):
+                    contrast_metrics["raw_minus_ln_global_batch"] = (
+                        raw_v.detach().float() - gb_safe.log()
+                    )
+                if isinstance(top1_v, torch.Tensor):
+                    contrast_metrics["top1_minus_random"] = (
+                        top1_v.detach().float() - rand_top1
+                    )
+        except Exception:
+            pass
+        with torch.no_grad():
+            b_local = int(prot_z.size(0))
+            perm = (
+                torch.roll(torch.arange(b_local, device=device), shifts=1)
+                if b_local > 1
+                else torch.arange(b_local, device=device)
+            )
+            lig_z_shuf = lig_z.index_select(0, perm)
+            valid_mask_shuf = valid_mask.index_select(0, perm)
+            shuffled_loss, _ = self.loss.contrast_loss(
+                prot_z=prot_z.detach(),
+                lig_z=lig_z_shuf.detach(),
+                logit_scale=logit_scale.detach(),
+                valid_mask=valid_mask_shuf.detach(),
+            )
+        contrast_metrics["local_top1_wo_gather"] = top1_local.detach()
+        contrast_metrics["local_diag_minus_offdiag_wo_gather"] = (
+            diag_minus_offdiag_local.detach()
+        )
+        contrast_metrics["raw_shuffled_local"] = shuffled_loss.detach()
+        contrast_metrics["raw_gap_vs_shuffled"] = (
+            shuffled_loss.detach() - contrast_loss.detach()
+        )
+        contrast_metrics["pair_id_missing"] = torch.tensor(
+            pair_id_missing, device=device, dtype=torch.float32
+        )
+        contrast_metrics["pair_id_unique"] = torch.tensor(
+            float(len(set(pair_ids))), device=device, dtype=torch.float32
+        )
+        contrast_metrics["pair_id_dup"] = torch.tensor(
+            float(max(0, len(pair_ids) - len(set(pair_ids)))),
+            device=device,
+            dtype=torch.float32,
+        )
+        contrast_metrics["prot_uid_unique"] = torch.tensor(
+            float(len(set(prot_uid_rows))), device=device, dtype=torch.float32
+        )
+        contrast_metrics["lig_uid_unique"] = torch.tensor(
+            float(len(set(lig_uid_rows))), device=device, dtype=torch.float32
+        )
+        contrast_metrics["prot_uid_missing"] = torch.tensor(
+            float(prot_uid_missing), device=device, dtype=torch.float32
+        )
+        contrast_metrics["lig_uid_missing"] = torch.tensor(
+            float(lig_uid_missing), device=device, dtype=torch.float32
+        )
+        contrast_metrics["pair_index_ok"] = torch.tensor(
+            1.0 if (len(prot_rows) == len(lig_rows) == len(batch_list)) else 0.0,
+            device=device,
+            dtype=torch.float32,
+        )
+
+        contrast_metrics["missing_input_total"] = torch.tensor(
+            sum(missing.values()), device=device, dtype=torch.float32
+        )
+        contrast_metrics["missing_input_prot_z"] = torch.tensor(
+            missing["contrast_prot_z"], device=device, dtype=torch.float32
+        )
+        contrast_metrics["missing_input_lig_z"] = torch.tensor(
+            missing["contrast_lig_z"], device=device, dtype=torch.float32
+        )
+        contrast_metrics["missing_input_logit_scale"] = torch.tensor(
+            missing["contrast_logit_scale"], device=device, dtype=torch.float32
+        )
+        contrast_metrics["missing_input_valid_mask"] = torch.tensor(
+            missing["contrast_valid_mask"], device=device, dtype=torch.float32
+        )
+        return contrast_loss, contrast_metrics
 
     @torch.no_grad()
     def get_metrics(self, batch: dict) -> dict:
@@ -774,24 +1246,136 @@ class AF3Trainer(object):
             enabled=(self.configs.dtype == "float16"),
         )
 
+        batch_list = batch if isinstance(batch, list) else [batch]
+        contrast_cfg = getattr(self.configs, "contrast", {})
+        try:
+            contrast_only_forward = bool(
+                contrast_cfg.get("only_forward", False)
+                if isinstance(contrast_cfg, dict)
+                else contrast_cfg.get("only_forward", False)
+            )
+        except Exception:
+            contrast_only_forward = bool(
+                getattr(contrast_cfg, "only_forward", False)
+            )
         with enable_amp:
-            batch, _ = self.model_forward(batch, mode="train")
-            # 调试信息
-            if DIST_WRAPPER.rank == 0 and self.step < 50:
-                try:
-                    is_lig_sum = int(batch["input_feature_dict"]["is_ligand"].sum().item())
-                    if is_lig_sum == 0:
-                        b = batch.get("basic", {})
-                        print(
-                            f"[NO_LIGAND][step={self.step}] pdb_id={b.get('pdb_id')} assembly_id={b.get('assembly_id')} "
-                            f"chain_1_id={b.get('chain_1_id', None)} chain_2_id={b.get('chain_2_id', None)} "
-                            f"asym_id_unique={batch['input_feature_dict']['asym_id'].unique().tolist()[:20]} "
-                            f"num_tokens={b.get('num_tokens', None)}"
+            if len(batch_list) == 1:
+                batch, _ = self.model_forward(batch_list[0], mode="train")
+                if contrast_only_forward:
+                    contrast_loss, contrast_metrics = self._compute_group_contrast_loss([batch])
+                    contrast_weight = float(
+                        self.loss._get_effective_loss_weight(
+                            "contrast_loss", batch["input_feature_dict"], mode="train"
                         )
-                except Exception as e:
-                    print("[NO_LIGAND] debug print failed:", e)
-            # 调试结束
-            loss, loss_dict, _ = self.get_loss(batch, mode="train")
+                    )
+                    loss = contrast_weight * contrast_loss
+                    loss_dict = {
+                        "contrast_loss": contrast_loss.detach().clone(),
+                        "weighted_contrast_loss": (contrast_weight * contrast_loss).detach().clone(),
+                        "contrast_loss/weight": torch.tensor(
+                            contrast_weight, device=contrast_loss.device, dtype=contrast_loss.dtype
+                        ),
+                    }
+                    for key, value in contrast_metrics.items():
+                        loss_dict[f"contrast_loss/{key}"] = (
+                            value.detach().clone()
+                            if torch.is_tensor(value)
+                            else torch.tensor(float(value), device=contrast_loss.device, dtype=torch.float32)
+                        )
+                    loss_dict["loss"] = loss.detach().clone()
+                else:
+                    # 调试信息
+                    if DIST_WRAPPER.rank == 0 and self.step < 50:
+                        try:
+                            is_lig_sum = int(batch["input_feature_dict"]["is_ligand"].sum().item())
+                            if is_lig_sum == 0:
+                                b = batch.get("basic", {})
+                                print(
+                                    f"[NO_LIGAND][step={self.step}] pdb_id={b.get('pdb_id')} assembly_id={b.get('assembly_id')} "
+                                    f"chain_1_id={b.get('chain_1_id', None)} chain_2_id={b.get('chain_2_id', None)} "
+                                    f"asym_id_unique={batch['input_feature_dict']['asym_id'].unique().tolist()[:20]} "
+                                    f"num_tokens={b.get('num_tokens', None)}"
+                                )
+                        except Exception as e:
+                            print("[NO_LIGAND] debug print failed:", e)
+                    # 调试结束
+                    loss, loss_dict, _ = self.get_loss(batch, mode="train")
+            else:
+                # True local batch path: each item contributes to structure loss;
+                # contrast is computed once on stacked local embeddings.
+                contrast_enabled = bool(getattr(self.loss, "contrast_enable", False))
+                if contrast_only_forward:
+                    for i, sample in enumerate(batch_list):
+                        sample, _ = self.model_forward(sample, mode="train")
+                        batch_list[i] = sample
+                    if contrast_enabled:
+                        contrast_loss, contrast_metrics = self._compute_group_contrast_loss(batch_list)
+                        contrast_weight = float(
+                            self.loss._get_effective_loss_weight(
+                                "contrast_loss", batch_list[0]["input_feature_dict"], mode="train"
+                            )
+                        )
+                        loss = contrast_weight * contrast_loss
+                        loss_dict = {
+                            "contrast_loss": contrast_loss.detach().clone(),
+                            "weighted_contrast_loss": (contrast_weight * contrast_loss).detach().clone(),
+                            "contrast_loss/weight": torch.tensor(
+                                contrast_weight, device=contrast_loss.device, dtype=contrast_loss.dtype
+                            ),
+                        }
+                        for key, value in contrast_metrics.items():
+                            loss_dict[f"contrast_loss/{key}"] = (
+                                value.detach().clone()
+                                if torch.is_tensor(value)
+                                else torch.tensor(float(value), device=contrast_loss.device, dtype=torch.float32)
+                            )
+                        loss_dict["loss"] = loss.detach().clone()
+                    else:
+                        loss = torch.tensor(
+                            0.0, device=self.device, dtype=torch.float32, requires_grad=True
+                        )
+                        loss_dict = {"loss": loss.detach().clone()}
+                else:
+                    structure_losses = []
+                    structure_loss_dicts = []
+                    if contrast_enabled:
+                        self.loss.contrast_enable = False
+                    try:
+                        for sample in batch_list:
+                            sample, _ = self.model_forward(sample, mode="train")
+                            loss_i, loss_dict_i, _ = self.get_loss(sample, mode="train")
+                            structure_losses.append(loss_i)
+                            structure_loss_dicts.append(loss_dict_i)
+                    finally:
+                        if contrast_enabled:
+                            self.loss.contrast_enable = True
+
+                    loss = torch.stack(structure_losses).mean()
+                    loss_dict = self._merge_loss_dicts_mean(structure_loss_dicts)
+
+                    if contrast_enabled:
+                        contrast_loss, contrast_metrics = self._compute_group_contrast_loss(batch_list)
+                        contrast_weight = float(
+                            self.loss._get_effective_loss_weight(
+                                "contrast_loss", batch_list[0]["input_feature_dict"], mode="train"
+                            )
+                        )
+                        loss = loss + contrast_weight * contrast_loss
+                        loss_dict["contrast_loss"] = contrast_loss.detach().clone()
+                        loss_dict["weighted_contrast_loss"] = (
+                            contrast_weight * contrast_loss
+                        ).detach().clone()
+                        loss_dict["contrast_loss/weight"] = torch.tensor(
+                            contrast_weight, device=contrast_loss.device, dtype=contrast_loss.dtype
+                        )
+                        for key, value in contrast_metrics.items():
+                            loss_dict[f"contrast_loss/{key}"] = (
+                                value.detach().clone()
+                                if torch.is_tensor(value)
+                                else torch.tensor(float(value), device=contrast_loss.device, dtype=torch.float32)
+                            )
+
+                    loss_dict["loss"] = loss.detach().clone()
 
         if self.configs.dtype in ["bf16", "fp32"]:
             if is_loss_nan_check(loss):
@@ -811,6 +1395,68 @@ class AF3Trainer(object):
             )
             # Unscales the gradients of optimizer's assigned parameters in-place
             scaler.unscale_(self.optimizer)
+            # Contrast grad/optimizer connectivity debug (rank0, early steps only)
+            grad_debug_metrics = {}
+            if DIST_WRAPPER.rank == 0 and self.step < 30:
+                try:
+                    opt_param_ids = {
+                        id(p)
+                        for group in self.optimizer.param_groups
+                        for p in group["params"]
+                    }
+
+                    def _report_grad(key: str):
+                        total = 0
+                        in_opt = 0
+                        with_grad = 0
+                        in_opt_with_grad = 0
+                        grad_norm_sum = 0.0
+                        for n, p in self.model.named_parameters():
+                            if key not in n:
+                                continue
+                            total += 1
+                            if id(p) in opt_param_ids:
+                                in_opt += 1
+                            if p.grad is not None:
+                                with_grad += 1
+                                grad_norm_sum += p.grad.detach().float().norm(2).item()
+                                if id(p) in opt_param_ids:
+                                    in_opt_with_grad += 1
+                        self.print(
+                            f"[GRAD_DEBUG][step={self.step}] key={key} "
+                            f"total={total} in_opt={in_opt} with_grad={with_grad} "
+                            f"in_opt_with_grad={in_opt_with_grad} grad_norm_sum={grad_norm_sum:.6e}"
+                        )
+                        grad_debug_metrics[f"contrast_loss/grad_norm_sum_{key}"] = torch.tensor(
+                            float(grad_norm_sum), device=self.device, dtype=torch.float32
+                        )
+                        grad_debug_metrics[f"contrast_loss/params_total_{key}"] = torch.tensor(
+                            float(total), device=self.device, dtype=torch.float32
+                        )
+                        grad_debug_metrics[f"contrast_loss/params_in_opt_{key}"] = torch.tensor(
+                            float(in_opt), device=self.device, dtype=torch.float32
+                        )
+                        grad_debug_metrics[f"contrast_loss/params_with_grad_{key}"] = torch.tensor(
+                            float(with_grad), device=self.device, dtype=torch.float32
+                        )
+                        grad_debug_metrics[
+                            f"contrast_loss/params_in_opt_with_grad_{key}"
+                        ] = torch.tensor(
+                            float(in_opt_with_grad), device=self.device, dtype=torch.float32
+                        )
+
+                    for _k in [
+                        "esm_proj",
+                        "unimol_proj",
+                        "esm_contrast_proj",
+                        "unimol_contrast_proj",
+                        "logit_scale",
+                    ]:
+                        _report_grad(_k)
+                except Exception as e:
+                    self.print(f"[GRAD_DEBUG] failed: {e}")
+            if len(grad_debug_metrics) > 0:
+                loss_dict.update(grad_debug_metrics)
             # Do grad clip only
             self.update()
             scaler.step(self.optimizer)
@@ -851,8 +1497,21 @@ class AF3Trainer(object):
 
         This function handles the training process, evaluation, logging, and checkpoint saving.
         """
+        contrast_cfg = getattr(self.configs, "contrast", {})
+        try:
+            contrast_only_forward = bool(
+                contrast_cfg.get("only_forward", False)
+                if isinstance(contrast_cfg, dict)
+                else contrast_cfg.get("only_forward", False)
+            )
+        except Exception:
+            contrast_only_forward = bool(getattr(contrast_cfg, "only_forward", False))
+
         if self.configs.eval_only or self.configs.eval_first:
-            self.evaluate()
+            if contrast_only_forward:
+                self.print("Skip eval: contrast.only_forward=True (no structure outputs).")
+            else:
+                self.evaluate()
             if self.configs.eval_only:
                 return
         use_ema = hasattr(self, "ema_wrapper")
@@ -907,7 +1566,12 @@ class AF3Trainer(object):
                         self.ema_wrapper.restore()
 
                 if step_need_eval or is_last_step:
-                    self.evaluate()
+                    if contrast_only_forward:
+                        self.print(
+                            "Skip eval at step boundary: contrast.only_forward=True."
+                        )
+                    else:
+                        self.evaluate()
                 self.global_step += 1
                 if self.global_step % self.iters_to_accumulate == 0:
                     self.step += 1
