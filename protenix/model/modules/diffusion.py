@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from typing import Optional, Union
 
 import torch
@@ -83,7 +84,7 @@ class DiffusionConditioning(nn.Module):
         # Line10-Line12
         self.transition_s1 = Transition(c_in=self.c_s, n=2)
         self.transition_s2 = Transition(c_in=self.c_s, n=2)
-        print(f"Diffusion Module has {self.sigma_data}")
+        logging.debug("Diffusion Module has %s", self.sigma_data)
 
     def forward(
         self,

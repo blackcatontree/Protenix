@@ -121,7 +121,7 @@ default_weighted_pdb_configs = {
     },
 }
 
-DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/home/dataset-local/tmp/zsl/Protenix/release_data")
+DATA_ROOT_DIR = os.environ.get("PROTENIX_DATA_ROOT_DIR", "/vepfs-mlp2/c20250601/252705034/Protenix/release_data")
 
 # Use CCD cache created by scripts/gen_ccd_cache.py priority. (without date in filename)
 # See: docs/prepare_data.md
@@ -180,6 +180,7 @@ if (
 data_configs = {
     "num_dl_workers": 16,
     "epoch_size": 10000,
+    "batch_size": 1,
     "train_ref_pos_augment": True,
     "test_ref_pos_augment": True,
     "train_sets": ListValue(["qbiolip_nonredund"]), # 原本的"weightedPDB_before2109_wopb_nometalc_0925",
@@ -228,9 +229,9 @@ data_configs = {
     },
     "qbiolip_nonredund": {
         "base_info": {
-            "mmcif_dir": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/mmcif",
-            "bioassembly_dict_dir": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/bioassembly",
-            "indices_fpath": "/home/dataset-local/tmp/zsl/Protenix/biolip/nonredund_pl/all_data/prepared/indices_PL_only.csv",
+            "mmcif_dir": "/vepfs-mlp2/c20250601/252705034/Protenix/biolip/nonredund_pl/all_data/mmcif",
+            "bioassembly_dict_dir": "/vepfs-mlp2/c20250601/252705034/Protenix/biolip/nonredund_pl/all_data/prepared/bioassembly",
+            "indices_fpath": "/vepfs-mlp2/c20250601/252705034/Protenix/biolip/nonredund_pl/all_data/prepared/indices_PL_only.csv",
             "pdb_list": "",
             "random_sample_if_failed": True,
             "max_n_token": -1,
@@ -248,6 +249,26 @@ data_configs = {
             "crop_size": 512,
         },
         
+    },
+    "qbiolip_nonredund_exclude_litpcba_overlap": {
+        "base_info": {
+            "mmcif_dir": "/vepfs-mlp2/c20250601/252705034/Protenix/biolip/nonredund_pl/all_data/mmcif",
+            "bioassembly_dict_dir": "/vepfs-mlp2/c20250601/252705034/Protenix/biolip/nonredund_pl/all_data/prepared/bioassembly",
+            "indices_fpath": "/vepfs-mlp2/c20250601/252705034/Protenix/biolip/nonredund_pl/all_data/prepared/indices_PL_only_exclude_litpcba_overlap.csv",
+            "pdb_list": "",
+            "random_sample_if_failed": True,
+            "max_n_token": -1,
+            "use_reference_chains_only": True,
+            "exclusion": {
+                "mol_1_type": ListValue(["ions"]),
+                "mol_2_type": ListValue(["ions"]),
+            },
+        },
+        **deepcopy(default_weighted_pdb_configs),
+        "cropping_configs": {
+            "method_weights": ListValue([0.0, 0.2, 0.8]),
+            "crop_size": 512,
+        },
     },
     "nuc_related_indices": {
         "base_info": {

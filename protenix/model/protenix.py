@@ -133,6 +133,9 @@ class Protenix(nn.Module):
         if esm_configs.get("esm_model_online", False):
             self.esm_model, self.alphabet = load_esm_model(esm_configs['model_name'], esm_configs['local_model_path'])
             self.esm_trainable = esm_configs.get("esm_trainable", False)
+            self.esm_trainable_last_n_layers = int(
+                esm_configs.get("trainable_last_n_layers", -1)
+            )
             self.truncation_seq_length = esm_configs.get("truncation_seq_length", 4096)
             if not self.esm_trainable:
                 for param in self.esm_model.parameters():
@@ -156,6 +159,9 @@ class Protenix(nn.Module):
             self.esm_dim = esm_configs.get("embedding_dim",None)
         else:
             self.esm_model_online = False
+            self.esm_trainable_last_n_layers = int(
+                esm_configs.get("trainable_last_n_layers", -1)
+            )
             self.esm_dim = (
                 esm_configs.get("embedding_dim", None)  # 配置里面的config状态
             )
@@ -178,6 +184,10 @@ class Protenix(nn.Module):
                 logger.info("UniMol model loaded successfully, load from the path {}".format(unimol_configs['pretrained_path']))
                 logger.info("Missing keys: {}".format(missing_keys))
                 logger.info("Unexpected keys: {}".format(unexpected_keys))
+            if not self.unimol_trainable:
+                for param in self.unimol_model.parameters():
+                    param.requires_grad = False
+                self.unimol_model.eval()
         else:
             self.use_unimol = False
             self.unimol_dim = None  # unimol
@@ -245,7 +255,15 @@ class Protenix(nn.Module):
         mlp_hidden = int(contrast_cfg.get("mlp_hidden",1024))
         # clip风格
         init_temp = float(contrast_cfg.get("init_temp",0.07))
-        self.logit_scale = nn.Parameter(torch.tensor(np.log(1.0 / init_temp), dtype=torch.float32))
+        self._contrast_learn_logit_scale = bool(
+            contrast_cfg.get("learn_logit_scale", False)
+        )
+        _logit_init = torch.tensor(np.log(1.0 / max(init_temp, 1e-6)), dtype=torch.float32)
+        if self._contrast_learn_logit_scale:
+            self.logit_scale = nn.Parameter(_logit_init)
+        else:
+            # Default stable mode: keep non-trainable to avoid DDP "marked ready twice".
+            self.register_buffer("logit_scale", _logit_init, persistent=True)
         #self.logit_scale = nn.Parameter(torch.tensor(1.0))  # 或者用 CLIP 那种 exp(logit_sca
         
         # mlp
@@ -265,18 +283,39 @@ class Protenix(nn.Module):
         if self.esm_dim is None or self.unimol_dim is None:
             self.esm_proj = None
             self.unimol_proj = None
+            # Backward-compatible aliases: contrast uses the same two MLP heads.
+            self.esm_contrast_proj = None
+            self.unimol_contrast_proj = None
             self.esm_proj_to_s_inputs = None
             self.unimol_proj_to_s_inputs = None
         else:
-            #self.esm_proj = nn.Linear(self.esm_dim, self.contrast_dim, bias=False)
-            #self.unimol_proj = nn.Linear(self.unimol_dim, self.contrast_dim, bias=False)
+            # Exactly two MLP heads:
+            # - mlp2: ESM(protein) -> proj
+            # - mlp1: UniMol(ligand) -> proj
+            # The same heads are shared by both
+            # (1) contrast loss branch and (2) structure branch.
             self.esm_proj = _mlp(self.esm_dim, self.contrast_dim)
             self.unimol_proj = _mlp(self.unimol_dim, self.contrast_dim)
+            # Keep aliases for compatibility with old checkpoints/scripts.
+            self.esm_contrast_proj = self.esm_proj
+            self.unimol_contrast_proj = self.unimol_proj
             # Reuse the same MLP embeddings for the structure branch by mapping to s_inputs dim.
             self.esm_proj_to_s_inputs = LinearNoBias(self.contrast_dim, self.c_s_inputs)
             self.unimol_proj_to_s_inputs = LinearNoBias(
                 self.contrast_dim, self.c_s_inputs
             )
+
+    def train(self, mode: bool = True):
+        """
+        Keep frozen encoder backbones in eval mode during training.
+        This avoids stochastic dropout/noise from ESM/UniMol when they are not trainable.
+        """
+        super().train(mode)
+        if getattr(self, "esm_model_online", False) and (not getattr(self, "esm_trainable", False)):
+            self.esm_model.eval()
+        if getattr(self, "use_unimol", False) and (not getattr(self, "unimol_trainable", False)):
+            self.unimol_model.eval()
+        return self
 
     def get_pairformer_output(
         self,
@@ -987,6 +1026,8 @@ class Protenix(nn.Module):
         chunk_size = self.configs.infer_setting.chunk_size if inplace_safe else None
 
         if self.esm_model_online:
+            if not self.esm_trainable:
+                self.esm_model.eval()
             sequences = input_feature_dict['sequences']  # list of strings
             # pickout the protein sequences only
             protein_entity_ids = input_feature_dict['protein_entity_ids']  # list of ints
@@ -1012,6 +1053,8 @@ class Protenix(nn.Module):
                     input_feature_dict["esm_token_embedding"] = esm_token_embedding
         
         if self.use_unimol:           
+            if not self.unimol_trainable:
+                self.unimol_model.eval()
             # get the ligand atom and positions
             ligand_mask = input_feature_dict['is_ligand'] == 1  # [N_Atoms,]
             if ligand_mask.sum() > 0:
@@ -1185,7 +1228,7 @@ class Protenix(nn.Module):
                 contrast_out = {
                                 "contrast_prot_z":prot_z,
                                 "contrast_lig_z":lig_z,
-                                "contrast_logit_scale":self.logit_scale,
+                                "contrast_logit_scale": self.logit_scale.detach(),
                                 "contrast_valid_mask": valid_mask,
                                 }
 
@@ -1222,7 +1265,11 @@ class Protenix(nn.Module):
                     self.unimol_proj_to_s_inputs(unimol_token_z)
                 )
 
-        if contrast_enable and (self.esm_proj is not None) and (self.unimol_proj is not None):
+        if (
+            contrast_enable
+            and (self.esm_proj is not None)
+            and (self.unimol_proj is not None)
+        ):
             # 是否真的有 ligand（用于 mask，不用于控制是否计算）
             has_ligand = (input_feature_dict["is_ligand"].sum() > 0).item()
 
@@ -1241,6 +1288,7 @@ class Protenix(nn.Module):
                 prot_global = prot_global.to(device=unimol_device)
 
             # --- always run projections so parameters are always used ---
+            # Shared MLP heads for both loss1 (contrast) and loss2 (structure).
             prot_z = self.esm_proj(prot_global)      # [D_proj]
             lig_z  = self.unimol_proj(lig_global)    # [D_proj]
 
@@ -1253,17 +1301,27 @@ class Protenix(nn.Module):
             #     "contrast_logit_scale": self.logit_scale,   # IMPORTANT: use the PARAMETER here
             #     "contrast_valid_mask": valid,
             # }
+            contrast_logit_scale = (
+                self.logit_scale
+                if self._contrast_learn_logit_scale
+                else self.logit_scale.detach()
+            )
             contrast_out = {
                 "contrast_prot_z": prot_z,
                 "contrast_lig_z": lig_z,
-                # Keep logit_scale trainable; ContrastiveCLIPLoss handles DDP-safe path.
-                "contrast_logit_scale": self.logit_scale,
+                "contrast_logit_scale": contrast_logit_scale,
                 "contrast_valid_mask": valid,
             }
 
 
 
         #pred_dict.update(contrast_out)
+        contrast_only_forward = bool(contrast_cfg.get("only_forward", False))
+        if contrast_only_forward:
+            pred_dict = {}
+            if contrast_out:
+                pred_dict.update(contrast_out)
+            return pred_dict
 
         #pdb.set_trace()
         

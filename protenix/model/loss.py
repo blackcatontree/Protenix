@@ -1162,17 +1162,20 @@ class MSELoss(nn.Module):
         )  # [..., N_sample]
 
     
-        # for debugging: print per-sample weighted mse before scaling
+        # Debug-only diagnostics (hidden unless logging level is DEBUG)
         per_sample_weighted_mse_org = per_sample_weighted_mse.clone()
         weighted_align_mse_loss_org = self.weight_mse * (per_sample_weighted_mse_org).mean(
             dim=-1
         )
         loss_org = loss_reduction(weighted_align_mse_loss_org, method=self.reduction)
-        print(f"DDBM MSELoss before scaling: {loss_org.item()}")
+        logging.debug("DDBM MSELoss before scaling: %.6f", float(loss_org.item()))
     
         if per_sample_scale is not None:
             if per_sample_scale.max() > 10000:
-                print(f'warning: per_sample_scale has large values: max={per_sample_scale.max().item()}')
+                logging.warning(
+                    "per_sample_scale has large values: max=%.6f",
+                    float(per_sample_scale.max().item()),
+                )
             per_sample_weighted_mse = per_sample_weighted_mse * per_sample_scale
 
         weighted_align_mse_loss = self.weight_mse * (per_sample_weighted_mse).mean(
@@ -1182,10 +1185,9 @@ class MSELoss(nn.Module):
         loss = loss_reduction(weighted_align_mse_loss, method=self.reduction)
         
         if loss.item() > loss_org.item() * 10:
-            print("Warning: Loss increased significantly after scaling!")
+            logging.warning("Loss increased significantly after scaling.")
         
-        # print loss for debugging
-        print(f"DDBM MSELoss: {loss.item()}")
+        logging.debug("DDBM MSELoss: %.6f", float(loss.item()))
 
         return loss
 
@@ -1447,38 +1449,61 @@ class _GatherLayer(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grads):
-        # grads is a tuple, one per rank output of forward()
-        # We only need the gradient that corresponds to this rank's slice.
-        return grads[ctx.rank]
+        # grads is a tuple, one per rank output of forward().
+        # Sum contributions from all ranks so gathered negatives also provide gradient.
+        grad_out = grads[ctx.rank].contiguous()
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(grad_out)
+        return grad_out
 
 
 class ContrastiveCLIPLoss(nn.Module):
     """
     CLIP-style contrastive loss with DDP-safe NO-GRAD global gather.
-    Assumes per-rank batch B=1 (one sample per GPU per step).
+    Supports per-rank batch B>=1.
     - Global features are gathered with .detach() (no gradient through gather).
     - Gradients flow to local prot_z / lig_z only.
-    - logit_scale is treated as a constant (detached) to avoid DDP "marked ready twice".
+    - Optional full-grad gather can be enabled by config.
+    - logit_scale can be detached (stable default) or trainable by config.
     - valid_mask=0 makes this sample contribute 0 to loss, but still participates in collectives.
     """
-    def __init__(self, max_scale: float = 100.0, eps: float = 1e-6) -> None:
+    def __init__(
+        self,
+        max_scale: float = 100.0,
+        eps: float = 1e-6,
+        use_grad_gather: bool = False,
+        detach_logit_scale: bool = True,
+        std_floor: float = 0.0,
+        std_reg_weight: float = 0.0,
+    ) -> None:
         super().__init__()
         self.max_scale = max_scale
         self.eps = eps
+        self.use_grad_gather = bool(use_grad_gather)
+        self.detach_logit_scale = bool(detach_logit_scale)
+        self.std_floor = float(std_floor)
+        self.std_reg_weight = float(std_reg_weight)
 
     @staticmethod
     def _dist_is_init() -> bool:
         return dist.is_available() and dist.is_initialized()
 
     @staticmethod
-    def _force_B1(z: torch.Tensor, D: int, device: torch.device) -> torch.Tensor:
+    def _force_BD(z: torch.Tensor, D: int, device: torch.device) -> torch.Tensor:
         if not isinstance(z, torch.Tensor):
             return torch.zeros((1, D), device=device, dtype=torch.float32)
         if z.dim() == 1:
             z = z.unsqueeze(0)
-        elif z.dim() == 2 and z.size(0) != 1:
-            z = z.mean(dim=0, keepdim=True)
-        elif z.dim() != 2:
+        elif z.dim() > 2:
+            z = z.reshape(-1, z.shape[-1])
+        if z.dim() != 2:
+            z = torch.zeros((1, D), device=device, dtype=torch.float32)
+        if z.shape[-1] != D:
+            if z.shape[-1] > D:
+                z = z[..., :D]
+            else:
+                z = F.pad(z, (0, D - z.shape[-1]))
+        if z.shape[0] == 0:
             z = torch.zeros((1, D), device=device, dtype=torch.float32)
         return z.to(device=device, dtype=torch.float32)
 
@@ -1489,18 +1514,70 @@ class ContrastiveCLIPLoss(nn.Module):
         if x.dim() == 1:
             x = x.unsqueeze(0)
         assert x.dim() == 2, f"expect [B,D], got {x.shape}"
-        assert x.size(0) == 1, f"this loss assumes B==1 per rank, got B={x.size(0)}"
 
         world = dist.get_world_size()
         rank = dist.get_rank()
+        local_b = x.size(0)
 
         x_det = x.detach()
         chunks = [torch.zeros_like(x_det) for _ in range(world)]
         dist.all_gather(chunks, x_det)
         chunks[rank] = x_det
-        return torch.cat(chunks, dim=0), rank  # [world, D], offset=rank
+        return torch.cat(chunks, dim=0), rank * local_b  # [world*B, D], offset=rank*B
 
-    def forward(self, prot_z, lig_z, logit_scale, valid_mask=None):
+    def _gather_global(self, x: torch.Tensor):
+        if not self._dist_is_init():
+            return x, 0
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        assert x.dim() == 2, f"expect [B,D], got {x.shape}"
+        if not self.use_grad_gather:
+            return self._gather_global_nograd(x)
+        world = dist.get_world_size()
+        rank = dist.get_rank()
+        local_b = x.size(0)
+        chunks = _GatherLayer.apply(x)
+        if isinstance(chunks, tuple):
+            x_all = torch.cat(list(chunks), dim=0)
+        else:
+            # conservative fallback
+            x_all = x
+        return x_all, rank * local_b
+
+    def _force_uid_1d(
+        self,
+        uid: torch.Tensor | None,
+        B: int,
+        device: torch.device,
+        tag: str,
+    ) -> torch.Tensor:
+        rank = dist.get_rank() if self._dist_is_init() else 0
+        base = int(rank) * 10_000_000 + (0 if tag == "prot" else 5_000_000)
+        default_uid = torch.arange(B, device=device, dtype=torch.long) + base
+        if uid is None:
+            return default_uid
+        try:
+            uid = torch.as_tensor(uid, device=device, dtype=torch.long).view(-1)
+        except Exception:
+            return default_uid
+        if uid.numel() == 1 and B > 1:
+            uid = uid.repeat(B)
+        elif uid.numel() < B:
+            pad = default_uid[uid.numel() :]
+            uid = torch.cat([uid, pad], dim=0)
+        elif uid.numel() > B:
+            uid = uid[:B]
+        return uid
+
+    def forward(
+        self,
+        prot_z,
+        lig_z,
+        logit_scale,
+        valid_mask=None,
+        prot_uid: torch.Tensor | None = None,
+        lig_uid: torch.Tensor | None = None,
+    ):
         if isinstance(prot_z, torch.Tensor):
             device = prot_z.device
             D = int(prot_z.shape[-1]) if prot_z.dim() >= 1 else 256
@@ -1511,54 +1588,165 @@ class ContrastiveCLIPLoss(nn.Module):
             device = torch.device("cuda")
             D = 256
 
-        prot_z = self._force_B1(prot_z, D=D, device=device)
-        lig_z  = self._force_B1(lig_z,  D=D, device=device)
+        prot_z = self._force_BD(prot_z, D=D, device=device)
+        lig_z  = self._force_BD(lig_z,  D=D, device=device)
+        B = min(int(prot_z.size(0)), int(lig_z.size(0)))
+        if B <= 0:
+            B = 1
+        prot_z = prot_z[:B]
+        lig_z = lig_z[:B]
+        prot_uid = self._force_uid_1d(prot_uid, B=B, device=device, tag="prot")
+        lig_uid = self._force_uid_1d(lig_uid, B=B, device=device, tag="lig")
 
         if valid_mask is None:
-            valid_mask = torch.ones((1,), device=device, dtype=torch.float32)
+            valid_mask = torch.ones((B,), device=device, dtype=torch.float32)
         else:
             valid_mask = torch.as_tensor(valid_mask, device=device, dtype=torch.float32).view(-1)
-            if valid_mask.numel() != 1:
-                valid_mask = valid_mask[:1]
+            if valid_mask.numel() == 1 and B > 1:
+                valid_mask = valid_mask.repeat(B)
+            elif valid_mask.numel() < B:
+                valid_mask = F.pad(valid_mask, (0, B - valid_mask.numel()), value=0.0)
+            elif valid_mask.numel() > B:
+                valid_mask = valid_mask[:B]
+
+        if self._dist_is_init():
+            b_local = torch.tensor([B], device=device, dtype=torch.long)
+            b_chunks = [torch.zeros_like(b_local) for _ in range(dist.get_world_size())]
+            dist.all_gather(b_chunks, b_local)
+            b_sync = max(1, min(int(x.item()) for x in b_chunks))
+            if b_sync < B:
+                B = b_sync
+                prot_z = prot_z[:B]
+                lig_z = lig_z[:B]
+                valid_mask = valid_mask[:B]
+                prot_uid = prot_uid[:B]
+                lig_uid = lig_uid[:B]
 
         # avoid NaN in normalize if missing ligand
-        if valid_mask.item() <= 0.0:
-            lig_z = torch.ones_like(lig_z)
+        invalid_rows = valid_mask <= 0.0
+        if invalid_rows.any():
+            lig_z = lig_z.clone()
+            lig_z[invalid_rows] = 1.0
 
         prot_z = F.normalize(prot_z, dim=-1)
         lig_z  = F.normalize(lig_z,  dim=-1)
 
-        prot_all, offset = self._gather_global_nograd(prot_z)
-        lig_all,  _      = self._gather_global_nograd(lig_z)
+        prot_all, offset = self._gather_global(prot_z)
+        lig_all,  _      = self._gather_global(lig_z)
 
         valid_all, _ = self._gather_global_nograd(valid_mask[:, None])
         valid_all = valid_all.squeeze(-1)  # [world]
+        prot_uid_all, _ = self._gather_global_nograd(prot_uid[:, None])
+        lig_uid_all, _ = self._gather_global_nograd(lig_uid[:, None])
+        prot_uid_all = prot_uid_all.squeeze(-1).to(dtype=torch.long)
+        lig_uid_all = lig_uid_all.squeeze(-1).to(dtype=torch.long)
 
-        # !!! CRITICAL FIX: keep logit_scale trainable here, and only detach in gather path.
-        scale = logit_scale.float().exp().clamp(max=self.max_scale)
+        if self.detach_logit_scale:
+            scale = logit_scale.detach().float().exp().clamp(max=self.max_scale)
+        else:
+            scale = logit_scale.float().exp().clamp(max=self.max_scale)
 
-        logits_p = (scale * (prot_z @ lig_all.t())).float()   # [1, world]
-        logits_l = (scale * (lig_z  @ prot_all.t())).float()  # [1, world]
+        logits_p = (scale * (prot_z @ lig_all.t())).float()   # [B, world*B]
+        logits_l = (scale * (lig_z  @ prot_all.t())).float()  # [B, world*B]
 
         invalid_cols = valid_all <= 0.0
         if invalid_cols.any():
             logits_p = logits_p.masked_fill(invalid_cols[None, :], -1e9)
             logits_l = logits_l.masked_fill(invalid_cols[None, :], -1e9)
 
-        labels = torch.tensor([offset], device=device, dtype=torch.long)
+        labels = torch.arange(B, device=device, dtype=torch.long) + offset
+        num_cols = int(logits_p.size(1))
+        pos_mask = F.one_hot(labels, num_classes=num_cols).bool()
+        dup_prot_mask = prot_uid[:, None].eq(prot_uid_all[None, :])
+        dup_lig_mask = lig_uid[:, None].eq(lig_uid_all[None, :])
+        dup_any_mask = (dup_prot_mask | dup_lig_mask) & (~pos_mask)
+        if invalid_cols.any():
+            dup_any_mask = dup_any_mask & (~invalid_cols[None, :])
+            dup_prot_mask = dup_prot_mask & (~invalid_cols[None, :])
+            dup_lig_mask = dup_lig_mask & (~invalid_cols[None, :])
+        if dup_any_mask.any():
+            logits_p = logits_p.masked_fill(dup_any_mask, -1e9)
+            logits_l = logits_l.masked_fill(dup_any_mask, -1e9)
 
-        loss_p = F.cross_entropy(logits_p, labels, reduction="none")  # [1]
-        loss_l = F.cross_entropy(logits_l, labels, reduction="none")  # [1]
-        loss = 0.5 * (loss_p + loss_l)                                # [1]
+        loss_p = F.cross_entropy(logits_p, labels, reduction="none")  # [B]
+        loss_l = F.cross_entropy(logits_l, labels, reduction="none")  # [B]
+        loss = 0.5 * (loss_p + loss_l)                                # [B]
 
         denom = valid_mask.sum() + self.eps
-        loss = (loss * valid_mask).sum() / denom
+        raw_loss = (loss * valid_mask).sum() / denom
+
+        valid_rows = valid_mask > 0.0
+        if valid_rows.any():
+            prot_reg = prot_z[valid_rows]
+            lig_reg = lig_z[valid_rows]
+        else:
+            prot_reg = prot_z
+            lig_reg = lig_z
+        prot_std_reg = prot_reg.std(dim=0, unbiased=False).mean()
+        lig_std_reg = lig_reg.std(dim=0, unbiased=False).mean()
+        collapse_penalty = (
+            F.relu(prot_std_reg.new_tensor(self.std_floor) - prot_std_reg)
+            + F.relu(lig_std_reg.new_tensor(self.std_floor) - lig_std_reg)
+        )
+        loss = raw_loss + (self.std_reg_weight * collapse_penalty)
+
+        # diagnostics: retrieval quality and embedding health
+        with torch.no_grad():
+            top1_p = (logits_p.argmax(dim=-1) == labels).float()
+            top1_l = (logits_l.argmax(dim=-1) == labels).float()
+            top1 = 0.5 * (top1_p + top1_l)
+            top1 = (top1 * valid_mask).sum() / denom
+
+            sim_p = prot_z @ lig_all.t()  # [B, world*B], normalized cosine
+            sim_l = lig_z @ prot_all.t()  # [B, world*B], normalized cosine
+            pos_mask = F.one_hot(labels, num_classes=num_cols).bool()
+            valid_cols = (valid_all > 0.0)[None, :].expand(B, num_cols)
+            off_mask = valid_cols & (~pos_mask) & (~dup_any_mask)
+
+            pos_sim_p = sim_p.gather(1, labels[:, None]).squeeze(-1)
+            pos_sim_l = sim_l.gather(1, labels[:, None]).squeeze(-1)
+
+            off_cnt_p = off_mask.sum(dim=-1).clamp(min=1).to(sim_p.dtype)
+            off_cnt_l = off_mask.sum(dim=-1).clamp(min=1).to(sim_l.dtype)
+            off_sum_p = sim_p.masked_fill(~off_mask, 0.0).sum(dim=-1)
+            off_sum_l = sim_l.masked_fill(~off_mask, 0.0).sum(dim=-1)
+            off_sim_p = off_sum_p / off_cnt_p
+            off_sim_l = off_sum_l / off_cnt_l
+
+            diag_minus_offdiag = 0.5 * (
+                (pos_sim_p - off_sim_p) + (pos_sim_l - off_sim_l)
+            )
+            diag_minus_offdiag = (diag_minus_offdiag * valid_mask).sum() / denom
+
+            prot_std = prot_std_reg.detach()
+            lig_std = lig_std_reg.detach()
+            valid_rows_bool = (valid_mask > 0.0)[:, None]
+            dup_prot_count = (dup_prot_mask & valid_rows_bool).float().sum() / denom
+            dup_lig_count = (dup_lig_mask & valid_rows_bool).float().sum() / denom
+            dup_any_count = (dup_any_mask & valid_rows_bool).float().sum() / denom
+            eff_candidates = (
+                (valid_cols & (~dup_any_mask)).float().sum(dim=-1) * valid_mask
+            ).sum() / denom
 
         metrics = {
+            "raw": raw_loss.detach(),
+            "final": loss.detach(),
+            "collapse_penalty": collapse_penalty.detach(),
             "logit_scale": scale.detach(),
+            "local_batch": torch.tensor(float(B), device=device, dtype=torch.float32),
             "valid_local": valid_mask.sum().detach(),
             "valid_global": valid_all.sum().detach(),
             "global_batch": torch.tensor(float(lig_all.size(0)), device=device, dtype=torch.float32),
+            "top1": top1.detach(),
+            "diag_minus_offdiag": diag_minus_offdiag.detach(),
+            "prot_std": prot_std.detach(),
+            "lig_std": lig_std.detach(),
+            "dup_prot_per_row": dup_prot_count.detach(),
+            "dup_lig_per_row": dup_lig_count.detach(),
+            "dup_any_per_row": dup_any_count.detach(),
+            "effective_candidates_per_row": eff_candidates.detach(),
+            "std_floor": torch.tensor(float(self.std_floor), device=device, dtype=torch.float32),
+            "std_reg_weight": torch.tensor(float(self.std_reg_weight), device=device, dtype=torch.float32),
         }
         return loss, metrics
 
@@ -1614,7 +1802,17 @@ class ProtenixLoss(nn.Module):
         # contrast
         self.contrast_enable = hasattr(configs, "contrast") and configs.contrast.enable
         if self.contrast_enable:
-            self.contrast_loss = ContrastiveCLIPLoss(max_scale=100.0)
+            use_grad_gather = bool(getattr(configs.contrast, "full_grad_gather", False))
+            learn_logit_scale = bool(getattr(configs.contrast, "learn_logit_scale", False))
+            std_floor = float(getattr(configs.contrast, "std_floor", 0.0))
+            std_reg_weight = float(getattr(configs.contrast, "std_reg_weight", 0.0))
+            self.contrast_loss = ContrastiveCLIPLoss(
+                max_scale=100.0,
+                use_grad_gather=use_grad_gather,
+                detach_logit_scale=(not learn_logit_scale),
+                std_floor=std_floor,
+                std_reg_weight=std_reg_weight,
+            )
             self.loss_weight["contrast_loss"] = float(configs.contrast.loss_weight)
             self.contrast_loss_weight_warmup_steps = int(
                 getattr(configs.contrast, "loss_weight_warmup_steps", 0)
@@ -1746,9 +1944,16 @@ class ProtenixLoss(nn.Module):
             ):
                 loss = 0.0 * loss
             else:
-                print(f'loss_name: {loss_name}, loss: {loss.item()}, weight: {weight}')
+                logging.debug(
+                    "loss_name: %s, loss: %.6f, weight: %.6f",
+                    loss_name,
+                    float(loss.item()),
+                    float(weight),
+                )
                 all_metrics[loss_name] = loss.detach().clone()
-                print(f'weighted_{loss_name}: {weight * loss.item()}')
+                logging.debug(
+                    "weighted_%s: %.6f", loss_name, float(weight * loss.item())
+                )
                 all_metrics[f"weighted_{loss_name}"] = weight * loss.detach().clone()
                 all_metrics[f"{loss_name}/weight"] = torch.tensor(
                     weight, device=loss.device, dtype=loss.dtype
@@ -1921,50 +2126,84 @@ class ProtenixLoss(nn.Module):
                     if pred_dict["contrast_lig_z"].dim() >= 1:
                         D = int(pred_dict["contrast_lig_z"].shape[-1])
 
-                def _force_B1(z: torch.Tensor) -> torch.Tensor:
+                B = 1
+                if "contrast_prot_z" in pred_dict and isinstance(pred_dict["contrast_prot_z"], torch.Tensor):
+                    if pred_dict["contrast_prot_z"].dim() == 2:
+                        B = max(B, int(pred_dict["contrast_prot_z"].shape[0]))
+                if "contrast_lig_z" in pred_dict and isinstance(pred_dict["contrast_lig_z"], torch.Tensor):
+                    if pred_dict["contrast_lig_z"].dim() == 2:
+                        B = max(B, int(pred_dict["contrast_lig_z"].shape[0]))
+                if "contrast_valid_mask" in pred_dict and isinstance(pred_dict["contrast_valid_mask"], torch.Tensor):
+                    vm_tmp = pred_dict["contrast_valid_mask"].view(-1)
+                    if vm_tmp.numel() > 1:
+                        B = max(B, int(vm_tmp.numel()))
+
+                def _force_BD(z: torch.Tensor) -> torch.Tensor:
                     """
-                    Ensure z is [1, D]. If z is [D], make it [1,D].
-                    If z is [B,D] with B!=1 (e.g. token-level), pool to [1,D].
+                    Ensure z is [B, D]. If z is [D], make it [1,D].
+                    Keep per-rank local batch dimension instead of collapsing to 1.
                     """
                     if z.dim() == 1:
-                        z = z.unsqueeze(0)           # [1,D]
-                    elif z.dim() == 2:
-                        if z.size(0) != 1:
-                            z = z.mean(dim=0, keepdim=True)  # [1,D]
+                        z = z.unsqueeze(0)
+                    elif z.dim() > 2:
+                        z = z.reshape(-1, z.shape[-1])
+                    if z.dim() != 2:
+                        z = torch.zeros((B, D), device=device, dtype=torch.float32)
+                    if z.shape[-1] != D:
+                        if z.shape[-1] > D:
+                            z = z[..., :D]
+                        else:
+                            z = F.pad(z, (0, D - z.shape[-1]))
+                    if z.shape[0] == 0:
+                        z = torch.zeros((B, D), device=device, dtype=torch.float32)
+                    if z.shape[0] < B:
+                        pad = torch.zeros((B - z.shape[0], D), device=device, dtype=torch.float32)
+                        z = torch.cat([z, pad], dim=0)
+                    elif z.shape[0] > B:
+                        z = z[:B]
                     else:
-                        # unexpected dims, fallback to zeros
-                        z = torch.zeros((1, D), device=device, dtype=torch.float32)
-                    # ensure dtype/device
-                    return z.to(device=device, dtype=torch.float32)
+                        z = z.to(device=device, dtype=torch.float32)
+                    return z
 
                 # Fill missing keys with dummy tensors
                 if "contrast_prot_z" not in pred_dict or not isinstance(pred_dict["contrast_prot_z"], torch.Tensor):
                     contrast_missing["contrast_prot_z"] = 1
-                    pred_dict["contrast_prot_z"] = torch.zeros((1, D), device=device, dtype=torch.float32)
+                    pred_dict["contrast_prot_z"] = torch.zeros((B, D), device=device, dtype=torch.float32)
                 if "contrast_lig_z" not in pred_dict or not isinstance(pred_dict["contrast_lig_z"], torch.Tensor):
                     contrast_missing["contrast_lig_z"] = 1
-                    pred_dict["contrast_lig_z"] = torch.zeros((1, D), device=device, dtype=torch.float32)
+                    pred_dict["contrast_lig_z"] = torch.zeros((B, D), device=device, dtype=torch.float32)
                 if "contrast_logit_scale" not in pred_dict or not isinstance(pred_dict["contrast_logit_scale"], torch.Tensor):
                     contrast_missing["contrast_logit_scale"] = 1
                     pred_dict["contrast_logit_scale"] = torch.zeros((), device=device, dtype=torch.float32)
                 if "contrast_valid_mask" not in pred_dict or not isinstance(pred_dict["contrast_valid_mask"], torch.Tensor):
                     contrast_missing["contrast_valid_mask"] = 1
-                    pred_dict["contrast_valid_mask"] = torch.zeros((1,), device=device, dtype=torch.float32)
+                    pred_dict["contrast_valid_mask"] = torch.zeros((B,), device=device, dtype=torch.float32)
 
-                # --- CRITICAL: enforce B=1 for all ranks to keep NCCL shapes identical ---
-                pred_dict["contrast_prot_z"] = _force_B1(pred_dict["contrast_prot_z"])
-                pred_dict["contrast_lig_z"]  = _force_B1(pred_dict["contrast_lig_z"])
+                pred_dict["contrast_prot_z"] = _force_BD(pred_dict["contrast_prot_z"])
+                pred_dict["contrast_lig_z"]  = _force_BD(pred_dict["contrast_lig_z"])
 
-                # valid_mask -> [1]
+                B = min(
+                    int(pred_dict["contrast_prot_z"].shape[0]),
+                    int(pred_dict["contrast_lig_z"].shape[0]),
+                )
+                pred_dict["contrast_prot_z"] = pred_dict["contrast_prot_z"][:B]
+                pred_dict["contrast_lig_z"] = pred_dict["contrast_lig_z"][:B]
+
                 vm = pred_dict["contrast_valid_mask"].to(device=device, dtype=torch.float32).view(-1)
-                if vm.numel() != 1:
-                    vm = vm[:1]
+                if vm.numel() == 1 and B > 1:
+                    vm = vm.repeat(B)
+                elif vm.numel() < B:
+                    vm = F.pad(vm, (0, B - vm.numel()), value=0.0)
+                elif vm.numel() > B:
+                    vm = vm[:B]
                 pred_dict["contrast_valid_mask"] = vm
 
                 # --- Avoid NaN when ligand is missing: if invalid, use a non-zero dummy vector ---
-                # (so normalize won't produce NaN even if eps isn't set)
-                if pred_dict["contrast_valid_mask"].item() <= 0:
-                    pred_dict["contrast_lig_z"] = torch.ones((1, D), device=device, dtype=torch.float32)
+                # (so normalize won't produce NaN even if eps isn't set). Per-sample apply.
+                invalid_rows = pred_dict["contrast_valid_mask"] <= 0
+                if invalid_rows.any():
+                    pred_dict["contrast_lig_z"] = pred_dict["contrast_lig_z"].clone()
+                    pred_dict["contrast_lig_z"][invalid_rows] = 1.0
 
                 # Always add contrast loss to ensure all ranks run the same collectives
                 loss_fns.update({

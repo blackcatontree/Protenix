@@ -13,6 +13,8 @@
 # limitations under the License.
 
 # pylint: disable=C0114,C0301
+import os
+
 from protenix.config.extend_types import (
     GlobalConfigValue,
     ListValue,
@@ -26,6 +28,8 @@ basic_configs = {
     "base_dir": RequiredValue(str),
     # training
     "eval_interval": RequiredValue(int),
+    "extra_eval_steps": ListValue([5]),
+    "extra_eval_interval": 500,
     "log_interval": RequiredValue(int),
     "checkpoint_interval": -1,
     "eval_first": False,  # run evaluate() before training steps
@@ -56,10 +60,20 @@ basic_configs = {
     
     # distill settings:
     "distill_model_type": "",  # the model type for distillation, e.g., protenix_mini_esm_v0.5.0
+    "benchmark": {
+        "enable_lit_pcba": True,
+        "lit_pcba_root": os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "benchmark", "lit_pcba")
+        ),
+        "lit_pcba_lig_batch_size": 64,
+        "lit_pcba_require_pocket": False,
+        "lit_pcba_limit_targets": 0,
+    },
 }
 data_configs = {
     # Data
     "train_crop_size": 256,
+    "batch_size": 1,
     "test_max_n_token": -1,
     "train_lig_atom_rename": False,
     "train_shuffle_mols": False,
@@ -71,6 +85,7 @@ data_configs = {
         "enable": False,
         "model_name": "esm2-3b",
         "embedding_dim": 2560,
+        "trainable_last_n_layers": -1,
     },
 }
 optim_configs = {

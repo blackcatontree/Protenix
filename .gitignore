@@ -145,3 +145,16 @@ tmp*
 *.gz
 *.cif
 *.csv
+# local benchmark data
+benchmark/lit_pcba/
+
+# local benchmark data
+benchmark/lit_pcba/**/*.lmdb
+benchmark/lit_pcba/**/*.tgz
+benchmark/lit_pcba/full_data*
+
+# local benchmark data
+benchmark/lit_pcba/
+benchmark/lit_pcba/**/*.lmdb
+benchmark/lit_pcba/**/*.tgz
+benchmark/lit_pcba/full_data*
